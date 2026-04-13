@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DrowsGuard Dashboard</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body { background: #0f172a; color: #cbd5e1; font-family: 'Segoe UI', sans-serif; }
+    .navbar { background: #1e293b; padding: 16px 32px; display: flex; align-items: center; justify-content: space-between; border-bottom: 1px solid #334155; }
+    .navbar h1 { color: #22d3ee; font-size: 20px; }
+    .navbar span { color: #64748b; font-size: 13px; }
+    .container { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+    .stat-card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
+    .stat-card .label { font-size: 12px; color: #64748b; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat-card .value { font-size: 36px; font-weight: 600; }
+    .cyan { color: #22d3ee; }
+    .red { color: #f87171; }
+    .orange { color: #fb923c; }
+    .purple { color: #a78bfa; }
+    .section { background: #1e293b; border-radius: 12px; padding: 24px; border: 1px solid #334155; margin-bottom: 24px; }
+    .section h2 { font-size: 15px; color: #94a3b8; margin-bottom: 16px; font-weight: 500; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { color: #64748b; font-weight: 500; text-align: left; padding: 8px 12px; border-bottom: 1px solid #334155; }
+    td { padding: 10px 12px; border-bottom: 1px solid #1a2744; color: #cbd5e1; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #162032; }
+    .badge { font-size: 11px; padding: 3px 10px; border-radius: 4px; font-weight: 500; }
+    .badge-ear { background: #3b1a1a; color: #f87171; }
+    .badge-mar { background: #2d1f4a; color: #a78bfa; }
+    .badge-ended { background: #1c3a2a; color: #4ade80; }
+    .badge-active { background: #1a2a3b; color: #22d3ee; }
+    .no-data { color: #64748b; text-align: center; padding: 32px; font-size: 14px; }
+  </style>
+</head>
+<body>
+
+  <div class="navbar">
+    <h1>&#9679; DrowsGuard</h1>
+    <span>Driver Drowsiness Detection — Session Dashboard</span>
+    <span id="clock"></span>
+  </div>
+
+  <div class="container">
+
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="label">Total Sessions</div>
+        <div class="value cyan">{{ total_sessions }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Total Alerts</div>
+        <div class="value red">{{ total_alerts }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Eye Closure Alerts</div>
+        <div class="value orange">{{ ear_alerts }}</div>
+      </div>
+      <div class="stat-card">
+        <div class="label">Yawn Alerts</div>
+        <div class="value purple">{{ mar_alerts }}</div>
+      </div>
+    </div>
+
+    <div class="section">
+      <h2>Session History</h2>
+      {% if sessions %}
+      <table>
+        <thead>
+          <tr>
+            <th>#</th>
+            <th>Start Time</th>
+            <th>End Time</th>
+            <th>Duration</th>
+            <th>Alerts</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for s in sessions %}
+          <tr>
+            <td>{{ s['id'] }}</td>
+            <td>{{ s['session_start'][:19] if s['session_start'] else '-' }}</td>
+            <td>{{ s['session_end'][:19] if s['session_end'] else 'Active' }}</td>
+            <td>{{ s['duration']|int if s['duration'] else '-' }}s</td>
+            <td><span class="red">{{ s['total_alerts'] }}</span></td>
+            <td>
+              {% if s['session_end'] %}
+                <span class="badge badge-ended">Ended</span>
+              {% else %}
+                <span class="badge badge-active">Active</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="no-data">No sessions recorded yet. Run main.py to start detecting!</div>
+      {% endif %}
+    </div>
+
+    <div class="section">
+      <h2>Recent Alerts (last 50)</h2>
+      {% if alerts %}
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th>
+            <th>Type</th>
+            <th>EAR Value</th>
+            <th>MAR Value</th>
+            <th>Frames</th>
+            <th>Session</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for a in alerts %}
+          <tr>
+            <td>{{ a['alert_time'][:19] if a['alert_time'] else '-' }}</td>
+            <td>
+              {% if a['alert_type'] == 'EAR' %}
+                <span class="badge badge-ear">EAR</span>
+              {% else %}
+                <span class="badge badge-mar">MAR</span>
+              {% endif %}
+            </td>
+            <td class="{% if a['ear_value'] and a['ear_value'] < 0.25 %}red{% endif %}">
+              {{ "%.4f"|format(a['ear_value']) if a['ear_value'] else '-' }}
+            </td>
+            <td class="{% if a['mar_value'] and a['mar_value'] > 0.6 %}purple{% endif %}">
+              {{ "%.4f"|format(a['mar_value']) if a['mar_value'] else '-' }}
+            </td>
+            <td>{{ a['duration_frames'] }}</td>
+            <td>#{{ a['session_id'] }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <div class="no-data">No alerts recorded yet.</div>
+      {% endif %}
+    </div>
+
+  </div>
+
+  <script>
+    function updateClock() {
+      const now = new Date();
+      document.getElementById('clock').textContent = now.toLocaleTimeString();
+    }
+    updateClock();
+    setInterval(updateClock, 1000);
+    setTimeout(() => location.reload(), 30000);
+  </script>
+
+</body>
+</html>
