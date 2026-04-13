@@ -4,6 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>DrowsGuard Dashboard</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     body { background: #0f172a; color: #cbd5e1; font-family: 'Segoe UI', sans-serif; }
@@ -11,149 +12,301 @@
     .navbar h1 { color: #22d3ee; font-size: 20px; }
     .navbar span { color: #64748b; font-size: 13px; }
     .container { max-width: 1200px; margin: 0 auto; padding: 32px 24px; }
-    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 32px; }
+    .status-bar { margin-bottom: 24px; padding: 20px 28px; border-radius: 12px; border: 1px solid #334155; display: flex; align-items: center; justify-content: space-between; background: #1e293b; }
+    .status-dot { width: 18px; height: 18px; border-radius: 50%; margin-right: 14px; flex-shrink: 0; }
+    .status-label { font-size: 11px; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 4px; }
+    .status-value { font-size: 22px; font-weight: 600; }
+    .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 24px; }
     .stat-card { background: #1e293b; border-radius: 12px; padding: 20px; border: 1px solid #334155; }
-    .stat-card .label { font-size: 12px; color: #64748b; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+    .stat-card .label { font-size: 11px; color: #64748b; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
     .stat-card .value { font-size: 36px; font-weight: 600; }
+    .stat-card .trend { font-size: 11px; color: #64748b; margin-top: 6px; }
     .cyan { color: #22d3ee; }
     .red { color: #f87171; }
     .orange { color: #fb923c; }
     .purple { color: #a78bfa; }
+    .green { color: #4ade80; }
     .section { background: #1e293b; border-radius: 12px; padding: 24px; border: 1px solid #334155; margin-bottom: 24px; }
     .section h2 { font-size: 15px; color: #94a3b8; margin-bottom: 16px; font-weight: 500; }
+    .filter-bar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+    .filter-btn { background: #0f172a; border: 1px solid #334155; color: #94a3b8; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
+    .filter-btn.active { background: #22d3ee22; border-color: #22d3ee; color: #22d3ee; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
     th { color: #64748b; font-weight: 500; text-align: left; padding: 8px 12px; border-bottom: 1px solid #334155; }
     td { padding: 10px 12px; border-bottom: 1px solid #1a2744; color: #cbd5e1; }
     tr:last-child td { border-bottom: none; }
-    tr:hover td { background: #162032; }
+    tr:hover td { background: #162032; cursor: pointer; }
     .badge { font-size: 11px; padding: 3px 10px; border-radius: 4px; font-weight: 500; }
     .badge-ear { background: #3b1a1a; color: #f87171; }
     .badge-mar { background: #2d1f4a; color: #a78bfa; }
     .badge-ended { background: #1c3a2a; color: #4ade80; }
     .badge-active { background: #1a2a3b; color: #22d3ee; }
+    .badge-high { background: #3b1a1a; color: #f87171; }
+    .badge-medium { background: #3b2a1a; color: #fb923c; }
+    .badge-low { background: #1c3a2a; color: #4ade80; }
     .no-data { color: #64748b; text-align: center; padding: 32px; font-size: 14px; }
+    .chart-container { position: relative; height: 220px; }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+    .insight-box { background: #162032; border-radius: 8px; padding: 14px 16px; margin-top: 12px; border-left: 3px solid #22d3ee; font-size: 13px; color: #94a3b8; }
+    .insight-box span { color: #22d3ee; font-weight: 500; }
   </style>
 </head>
 <body>
 
-  <div class="navbar">
-    <h1>&#9679; DrowsGuard</h1>
-    <span>Driver Drowsiness Detection — Session Dashboard</span>
-    <span id="clock"></span>
+<div class="navbar">
+  <h1>&#9679; DrowsGuard</h1>
+  <span>Driver Drowsiness Detection — Session Dashboard</span>
+  <span id="clock"></span>
+</div>
+
+<div class="container">
+
+  <!-- Status Bar -->
+  <div class="status-bar">
+    <div style="display:flex; align-items:center;">
+      <div class="status-dot" style="background: {{ risk_color }};"></div>
+      <div>
+        <div class="status-label">Driver Status</div>
+        <div class="status-value" style="color: {{ risk_color }};">{{ driver_status }}</div>
+      </div>
+    </div>
+    <div style="text-align:center;">
+      <div class="status-label">Risk Score</div>
+      <div class="status-value" style="color: {{ risk_color }};">{{ risk_level }}</div>
+    </div>
+    <div style="text-align:center;">
+      <div class="status-label">EAR Alerts</div>
+      <div class="status-value orange">{{ ear_alerts }}</div>
+    </div>
+    <div style="text-align:center;">
+      <div class="status-label">Yawn Alerts</div>
+      <div class="status-value purple">{{ mar_alerts }}</div>
+    </div>
+    <div style="text-align:right;">
+      <div class="status-label">Latest Session</div>
+      <div style="font-size:14px; color:#cbd5e1;">
+        {% if sessions %}{{ sessions[0]['total_alerts'] }} alerts in {{ sessions[0]['duration']|int if sessions[0]['duration'] else 0 }}s{% else %}No sessions yet{% endif %}
+      </div>
+      <div style="font-size:11px; color:#64748b; margin-top:4px;">Auto-refreshes every 30s</div>
+    </div>
   </div>
 
-  <div class="container">
-
-    <div class="stats-grid">
-      <div class="stat-card">
-        <div class="label">Total Sessions</div>
-        <div class="value cyan">{{ total_sessions }}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Total Alerts</div>
-        <div class="value red">{{ total_alerts }}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Eye Closure Alerts</div>
-        <div class="value orange">{{ ear_alerts }}</div>
-      </div>
-      <div class="stat-card">
-        <div class="label">Yawn Alerts</div>
-        <div class="value purple">{{ mar_alerts }}</div>
-      </div>
+  <!-- Stat Cards -->
+  <div class="stats-grid">
+    <div class="stat-card">
+      <div class="label">Total Sessions</div>
+      <div class="value cyan">{{ total_sessions }}</div>
+      <div class="trend">All recorded sessions</div>
     </div>
-
-    <div class="section">
-      <h2>Session History</h2>
-      {% if sessions %}
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Start Time</th>
-            <th>End Time</th>
-            <th>Duration</th>
-            <th>Alerts</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for s in sessions %}
-          <tr>
-            <td>{{ s['id'] }}</td>
-            <td>{{ s['session_start'][:19] if s['session_start'] else '-' }}</td>
-            <td>{{ s['session_end'][:19] if s['session_end'] else 'Active' }}</td>
-            <td>{{ s['duration']|int if s['duration'] else '-' }}s</td>
-            <td><span class="red">{{ s['total_alerts'] }}</span></td>
-            <td>
-              {% if s['session_end'] %}
-                <span class="badge badge-ended">Ended</span>
-              {% else %}
-                <span class="badge badge-active">Active</span>
-              {% endif %}
-            </td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="no-data">No sessions recorded yet. Run main.py to start detecting!</div>
-      {% endif %}
+    <div class="stat-card">
+      <div class="label">Total Alerts</div>
+      <div class="value red">{{ total_alerts }}</div>
+      <div class="trend">Across all sessions</div>
     </div>
-
-    <div class="section">
-      <h2>Recent Alerts (last 50)</h2>
-      {% if alerts %}
-      <table>
-        <thead>
-          <tr>
-            <th>Time</th>
-            <th>Type</th>
-            <th>EAR Value</th>
-            <th>MAR Value</th>
-            <th>Frames</th>
-            <th>Session</th>
-          </tr>
-        </thead>
-        <tbody>
-          {% for a in alerts %}
-          <tr>
-            <td>{{ a['alert_time'][:19] if a['alert_time'] else '-' }}</td>
-            <td>
-              {% if a['alert_type'] == 'EAR' %}
-                <span class="badge badge-ear">EAR</span>
-              {% else %}
-                <span class="badge badge-mar">MAR</span>
-              {% endif %}
-            </td>
-            <td class="{% if a['ear_value'] and a['ear_value'] < 0.25 %}red{% endif %}">
-              {{ "%.4f"|format(a['ear_value']) if a['ear_value'] else '-' }}
-            </td>
-            <td class="{% if a['mar_value'] and a['mar_value'] > 0.6 %}purple{% endif %}">
-              {{ "%.4f"|format(a['mar_value']) if a['mar_value'] else '-' }}
-            </td>
-            <td>{{ a['duration_frames'] }}</td>
-            <td>#{{ a['session_id'] }}</td>
-          </tr>
-          {% endfor %}
-        </tbody>
-      </table>
-      {% else %}
-      <div class="no-data">No alerts recorded yet.</div>
-      {% endif %}
+    <div class="stat-card">
+      <div class="label">Eye Closure Alerts</div>
+      <div class="value orange">{{ ear_alerts }}</div>
+      <div class="trend">EAR below 0.25 threshold</div>
     </div>
-
+    <div class="stat-card">
+      <div class="label">Yawn Alerts</div>
+      <div class="value purple">{{ mar_alerts }}</div>
+      <div class="trend">MAR above 0.6 threshold</div>
+    </div>
   </div>
 
-  <script>
-    function updateClock() {
-      const now = new Date();
-      document.getElementById('clock').textContent = now.toLocaleTimeString();
+  <!-- Chart + Insight -->
+  <div class="two-col">
+    <div class="section">
+      <h2>Alerts Per Session</h2>
+      <div class="chart-container">
+        <canvas id="alertChart"></canvas>
+      </div>
+    </div>
+    <div class="section">
+      <h2>System Insight</h2>
+      {% if total_alerts == 0 %}
+      <div class="insight-box">&#9679; <span>No alerts recorded.</span> Driver appears well-rested across all sessions.</div>
+      {% elif risk_level == "HIGH" %}
+      <div class="insight-box" style="border-color: #f87171;">&#9888; <span style="color:#f87171;">High Risk Detected.</span> Frequent drowsiness alerts suggest the driver needs rest immediately.</div>
+      {% elif risk_level == "MEDIUM" %}
+      <div class="insight-box" style="border-color: #fb923c;">&#9888; <span style="color:#fb923c;">Moderate Risk.</span> Some drowsiness detected. Consider taking a break soon.</div>
+      {% else %}
+      <div class="insight-box">&#9679; <span>Low Risk.</span> Driver appears alert. Continue monitoring.</div>
+      {% endif %}
+
+      <div style="margin-top: 16px;">
+        <div class="status-label" style="margin-bottom: 8px;">Alert Breakdown</div>
+        <div style="display:flex; gap:8px; flex-wrap:wrap;">
+          <span class="badge badge-ear">EAR: {{ ear_alerts }}</span>
+          <span class="badge badge-mar">MAR: {{ mar_alerts }}</span>
+          <span class="badge" style="background:#1e293b; color:#64748b;">Sessions: {{ total_sessions }}</span>
+        </div>
+      </div>
+
+      <div style="margin-top: 16px;">
+        <div class="status-label" style="margin-bottom: 8px;">Risk Level</div>
+        {% if risk_level == "HIGH" %}
+        <span class="badge badge-high">HIGH RISK</span>
+        {% elif risk_level == "MEDIUM" %}
+        <span class="badge badge-medium">MEDIUM RISK</span>
+        {% else %}
+        <span class="badge badge-low">LOW RISK</span>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Session History -->
+  <div class="section">
+    <h2>Session History</h2>
+    <div class="filter-bar">
+      <button class="filter-btn active" onclick="filterSessions('all')">All</button>
+      <button class="filter-btn" onclick="filterSessions('alerts')">With Alerts</button>
+      <button class="filter-btn" onclick="filterSessions('clean')">Clean Sessions</button>
+    </div>
+    {% if sessions %}
+    <table id="sessions-table">
+      <thead>
+        <tr>
+          <th>#</th>
+          <th>Start Time</th>
+          <th>End Time</th>
+          <th>Duration</th>
+          <th>Alerts</th>
+          <th>Risk</th>
+          <th>Status</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for s in sessions %}
+        <tr data-alerts="{{ s['total_alerts'] }}">
+          <td>{{ s['id'] }}</td>
+          <td>{{ s['session_start'][:19] if s['session_start'] else '-' }}</td>
+          <td>{{ s['session_end'][:19] if s['session_end'] else 'Active' }}</td>
+          <td>{{ s['duration']|int if s['duration'] else '-' }}s</td>
+          <td><span class="red">{{ s['total_alerts'] }}</span></td>
+          <td>
+            {% if s['total_alerts'] == 0 %}<span class="badge badge-low">LOW</span>
+            {% elif s['total_alerts'] < 5 %}<span class="badge badge-medium">MEDIUM</span>
+            {% else %}<span class="badge badge-high">HIGH</span>{% endif %}
+          </td>
+          <td>
+            {% if s['session_end'] %}<span class="badge badge-ended">Ended</span>
+            {% else %}<span class="badge badge-active">Active</span>{% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="no-data">No sessions recorded yet. Run main.py to start detecting!</div>
+    {% endif %}
+  </div>
+
+  <!-- Recent Alerts -->
+  <div class="section">
+    <h2>Recent Alerts (last 50)</h2>
+    <div class="filter-bar">
+      <button class="filter-btn active" onclick="filterAlerts('all')">All</button>
+      <button class="filter-btn" onclick="filterAlerts('EAR')">EAR Only</button>
+      <button class="filter-btn" onclick="filterAlerts('MAR')">MAR Only</button>
+    </div>
+    {% if alerts %}
+    <table id="alerts-table">
+      <thead>
+        <tr>
+          <th>Time</th>
+          <th>Type</th>
+          <th>EAR Value</th>
+          <th>MAR Value</th>
+          <th>Frames</th>
+          <th>Session</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for a in alerts %}
+        <tr data-type="{{ a['alert_type'] }}">
+          <td>{{ a['alert_time'][:19] if a['alert_time'] else '-' }}</td>
+          <td>
+            {% if a['alert_type'] == 'EAR' %}<span class="badge badge-ear">EAR</span>
+            {% else %}<span class="badge badge-mar">MAR</span>{% endif %}
+          </td>
+          <td class="{% if a['ear_value'] and a['ear_value'] < 0.25 %}red{% endif %}">
+            {{ "%.4f"|format(a['ear_value']) if a['ear_value'] else '-' }}
+          </td>
+          <td class="{% if a['mar_value'] and a['mar_value'] > 0.6 %}purple{% endif %}">
+            {{ "%.4f"|format(a['mar_value']) if a['mar_value'] else '-' }}
+          </td>
+          <td>{{ a['duration_frames'] }}</td>
+          <td>#{{ a['session_id'] }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    {% else %}
+    <div class="no-data">No alerts recorded yet.</div>
+    {% endif %}
+  </div>
+
+</div>
+
+<script>
+  function updateClock() {
+    document.getElementById('clock').textContent = new Date().toLocaleTimeString();
+  }
+  updateClock();
+  setInterval(updateClock, 1000);
+  setTimeout(() => location.reload(), 30000);
+
+  // Chart
+  const ctx = document.getElementById('alertChart').getContext('2d');
+  new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: {{ chart_labels | tojson }},
+      datasets: [{
+        label: 'Alerts',
+        data: {{ chart_values | tojson }},
+        backgroundColor: '#f8717155',
+        borderColor: '#f87171',
+        borderWidth: 1,
+        borderRadius: 4
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#64748b' }, grid: { color: '#1e293b' } },
+        y: { ticks: { color: '#64748b' }, grid: { color: '#334155' }, beginAtZero: true }
+      }
     }
-    updateClock();
-    setInterval(updateClock, 1000);
-    setTimeout(() => location.reload(), 30000);
-  </script>
+  });
+
+  // Filter sessions
+  function filterSessions(type) {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    document.querySelectorAll('#sessions-table tbody tr').forEach(row => {
+      const alerts = parseInt(row.dataset.alerts);
+      if (type === 'all') row.style.display = '';
+      else if (type === 'alerts') row.style.display = alerts > 0 ? '' : 'none';
+      else if (type === 'clean') row.style.display = alerts === 0 ? '' : 'none';
+    });
+  }
+
+  // Filter alerts
+  function filterAlerts(type) {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    event.target.classList.add('active');
+    document.querySelectorAll('#alerts-table tbody tr').forEach(row => {
+      if (type === 'all') row.style.display = '';
+      else row.style.display = row.dataset.type === type ? '' : 'none';
+    });
+  }
+</script>
 
 </body>
 </html>
