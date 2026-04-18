@@ -3,7 +3,7 @@ import dlib
 import numpy as np
 import sqlite3
 import threading
-import winsound
+import pyttsx3
 from datetime import datetime
 from scipy.spatial import distance as dist
 from imutils import face_utils
@@ -34,13 +34,18 @@ def get_greeting():
     elif 17 <= hour < 21: return "Good Evening"
     else:                 return "Good Night"
 
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)
+engine.setProperty('volume', 1.0)
+
 def play_alert_sound(alert_type="EAR"):
-    def beep():
+    def speak():
         if alert_type == "EAR":
-            for _ in range(3): winsound.Beep(1000, 300)
+            engine.say("Drowsiness detected! Please take a break.")
         else:
-            for _ in range(2): winsound.Beep(600, 400)
-    threading.Thread(target=beep, daemon=True).start()
+            engine.say("Yawning detected. You seem tired. Please rest.")
+        engine.runAndWait()
+    threading.Thread(target=speak, daemon=True).start()
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
