@@ -242,8 +242,8 @@ while True:
         break
 
     # FPS
-    now       = datetime.now()
-    fps       = int(1 / max((now - prev_time).total_seconds(), 0.001))
+    now       = time.perf_counter()
+    fps       = int(1 / max(now - prev_time, 1e-6))
     prev_time = now
 
     frame = cv2.resize(frame, (900, 660))
