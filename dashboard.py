@@ -34,10 +34,12 @@ def index():
     sessions = c.fetchall()
 
     c.execute("""
-        SELECT a.id, a.alert_time, a.alert_type, a.ear_value,
-               a.mar_value, a.duration_frames, a.session_id
-        FROM alerts a ORDER BY a.id DESC LIMIT 50
-    """)
+        SELECT id, session_start, session_end, total_alerts, avg_ear,
+    ROUND(
+        (JULIANDAY(COALESCE(session_end, datetime('now'))) - JULIANDAY(session_start)) * 86400
+    ) as duration
+    FROM sessions ORDER BY id DESC
+""")
     alerts = c.fetchall()
 
     # Alert trend — alerts per session for chart
