@@ -3,7 +3,8 @@ import dlib
 import numpy as np
 import sqlite3
 import threading
-import pyttsx3
+#import pyttsx3
+import time  
 from datetime import datetime
 from scipy.spatial import distance as dist
 from imutils import face_utils
@@ -226,7 +227,7 @@ mar_counter      = 0
 ear_alert_logged = False
 mar_alert_logged = False
 status           = "OK"
-prev_time        = datetime.now()
+prev_time        = time.perf_counter() 
 
 print(f"{greeting}! Session {session_id} started.")
 print("Starting webcam... Press Q or ESC to quit.")
