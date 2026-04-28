@@ -99,11 +99,19 @@ def end_session(session_id):
     with db_lock:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         c = conn.cursor()
-        c.execute("UPDATE sessions SET session_end=? WHERE id=?",
-                  (datetime.now().isoformat(), session_id))
+        c.execute("""
+            SELECT COALESCE(AVG(ear_value), 0.0)
+            FROM alerts WHERE session_id=?
+        """, (session_id,))
+        avg_ear = round(c.fetchone()[0], 4)
+        c.execute("""
+            UPDATE sessions
+            SET session_end=?, avg_ear=?
+            WHERE id=?
+        """, (datetime.now().isoformat(), avg_ear, session_id))
         conn.commit()
         conn.close()
-        
+
 def eye_aspect_ratio(eye):
     A = dist.euclidean(eye[1], eye[5])
     B = dist.euclidean(eye[2], eye[4])
