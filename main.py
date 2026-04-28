@@ -34,17 +34,20 @@ def get_greeting():
     elif 17 <= hour < 21: return "Good Evening"
     else:                 return "Good Night"
 
-engine = pyttsx3.init()
-engine.setProperty('rate', 150)
-engine.setProperty('volume', 1.0)
-
 def play_alert_sound(alert_type="EAR"):
     def speak():
-        if alert_type == "EAR":
-            engine.say("Drowsiness detected! Please take a break.")
-        else:
-            engine.say("Yawning detected. You seem tired. Please rest.")
-        engine.runAndWait()
+        try:
+            _engine = pyttsx3.init()
+            _engine.setProperty('rate', 150)
+            _engine.setProperty('volume', 1.0)
+            if alert_type == "EAR":
+                _engine.say("Drowsiness detected! Please take a break.")
+            else:
+                _engine.say("Yawning detected. You seem tired. Please rest.")
+            _engine.runAndWait()
+            _engine.stop()
+        except Exception as e:
+            print(f"[Audio] Alert failed: {e}")
     threading.Thread(target=speak, daemon=True).start()
 
 def init_db():
