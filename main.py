@@ -8,6 +8,8 @@ from datetime import datetime
 from scipy.spatial import distance as dist
 from imutils import face_utils
 
+db_lock = threading.Lock()
+
 # ── Constants ───────────────────────────────────────────────────────────
 EAR_THRESHOLD     = 0.25
 MAR_THRESHOLD     = 0.6
@@ -51,53 +53,57 @@ def play_alert_sound(alert_type="EAR"):
     threading.Thread(target=speak, daemon=True).start()
 
 def init_db():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''CREATE TABLE IF NOT EXISTS sessions (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_start TEXT, session_end TEXT,
-        total_alerts INTEGER DEFAULT 0,
-        avg_ear REAL, synced INTEGER DEFAULT 0)''')
-    c.execute('''CREATE TABLE IF NOT EXISTS alerts (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        session_id INTEGER, alert_time TEXT,
-        alert_type TEXT, ear_value REAL,
-        mar_value REAL, duration_frames INTEGER,
-        synced INTEGER DEFAULT 0)''')
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute('''CREATE TABLE IF NOT EXISTS sessions (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_start TEXT, session_end TEXT,
+            total_alerts INTEGER DEFAULT 0,
+            avg_ear REAL, synced INTEGER DEFAULT 0)''')
+        c.execute('''CREATE TABLE IF NOT EXISTS alerts (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id INTEGER, alert_time TEXT,
+            alert_type TEXT, ear_value REAL,
+            mar_value REAL, duration_frames INTEGER,
+            synced INTEGER DEFAULT 0)''')
+        conn.commit()
+        conn.close()
 
 def start_session():
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("INSERT INTO sessions (session_start) VALUES (?)",
-              (datetime.now().isoformat(),))
-    sid = c.lastrowid
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute("INSERT INTO sessions (session_start) VALUES (?)",
+                  (datetime.now().isoformat(),))
+        sid = c.lastrowid
+        conn.commit()
+        conn.close()
     return sid
 
 def log_alert(session_id, alert_type, ear, mar, frames):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute('''INSERT INTO alerts
-        (session_id, alert_time, alert_type, ear_value, mar_value, duration_frames)
-        VALUES (?,?,?,?,?,?)''',
-        (session_id, datetime.now().isoformat(), alert_type,
-         round(float(ear), 4), round(float(mar), 4), int(frames)))
-    c.execute("UPDATE sessions SET total_alerts = total_alerts + 1 WHERE id=?",
-              (session_id,))
-    conn.commit()
-    conn.close()
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute('''INSERT INTO alerts
+            (session_id, alert_time, alert_type, ear_value, mar_value, duration_frames)
+            VALUES (?,?,?,?,?,?)''',
+            (session_id, datetime.now().isoformat(), alert_type,
+             round(float(ear), 4), round(float(mar), 4), int(frames)))
+        c.execute("UPDATE sessions SET total_alerts = total_alerts + 1 WHERE id=?",
+                  (session_id,))
+        conn.commit()
+        conn.close()
 
 def end_session(session_id):
-    conn = sqlite3.connect(DB_PATH)
-    c = conn.cursor()
-    c.execute("UPDATE sessions SET session_end=? WHERE id=?",
-              (datetime.now().isoformat(), session_id))
-    conn.commit()
-    conn.close()
-
+    with db_lock:
+        conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+        c = conn.cursor()
+        c.execute("UPDATE sessions SET session_end=? WHERE id=?",
+                  (datetime.now().isoformat(), session_id))
+        conn.commit()
+        conn.close()
+        
 def eye_aspect_ratio(eye):
     A = dist.euclidean(eye[1], eye[5])
     B = dist.euclidean(eye[2], eye[4])
