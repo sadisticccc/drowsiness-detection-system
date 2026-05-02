@@ -3,8 +3,15 @@ import dlib
 import numpy as np
 import sqlite3
 import threading
-#import pyttsx3
-import time  
+import time
+
+# Audio: try pyttsx3, warn cleanly if not installed
+try:
+    import pyttsx3
+    _PYTTSX3_AVAILABLE = True
+except ImportError:
+    _PYTTSX3_AVAILABLE = False
+    print("[Audio] pyttsx3 not found — install it with: pip install pyttsx3")
 from datetime import datetime
 from scipy.spatial import distance as dist
 from imutils import face_utils
@@ -37,20 +44,31 @@ def get_greeting():
     elif 17 <= hour < 21: return "Good Evening"
     else:                 return "Good Night"
 
+_audio_lock = threading.Lock()   # prevent overlapping speech
+
 def play_alert_sound(alert_type="EAR"):
+    if not _PYTTSX3_AVAILABLE:
+        print(f"[Audio] Alert triggered ({alert_type}) — no audio engine available")
+        return
+
     def speak():
+        if not _audio_lock.acquire(blocking=False):
+            return                       # another alert is already playing, skip
         try:
-            _engine = pyttsx3.init()
-            _engine.setProperty('rate', 150)
-            _engine.setProperty('volume', 1.0)
+            engine = pyttsx3.init()
+            engine.setProperty('rate', 150)
+            engine.setProperty('volume', 1.0)
             if alert_type == "EAR":
-                _engine.say("Drowsiness detected! Please take a break.")
+                engine.say("Drowsiness detected! Please take a break.")
             else:
-                _engine.say("Yawning detected. You seem tired. Please rest.")
-            _engine.runAndWait()
-            _engine.stop()
+                engine.say("Yawning detected. You seem tired. Please rest.")
+            engine.runAndWait()
+            engine.stop()
         except Exception as e:
             print(f"[Audio] Alert failed: {e}")
+        finally:
+            _audio_lock.release()
+
     threading.Thread(target=speak, daemon=True).start()
 
 def init_db():
