@@ -3,15 +3,8 @@ import dlib
 import numpy as np
 import sqlite3
 import threading
-import time
-
-# Audio: try pyttsx3, warn cleanly if not installed
-try:
-    import pyttsx3
-    _PYTTSX3_AVAILABLE = True
-except ImportError:
-    _PYTTSX3_AVAILABLE = False
-    print("[Audio] pyttsx3 not found — install it with: pip install pyttsx3")
+#import pyttsx3
+import time  
 from datetime import datetime
 from scipy.spatial import distance as dist
 from imutils import face_utils
@@ -44,31 +37,20 @@ def get_greeting():
     elif 17 <= hour < 21: return "Good Evening"
     else:                 return "Good Night"
 
-_audio_lock = threading.Lock()   # prevent overlapping speech
-
 def play_alert_sound(alert_type="EAR"):
-    if not _PYTTSX3_AVAILABLE:
-        print(f"[Audio] Alert triggered ({alert_type}) — no audio engine available")
-        return
-
     def speak():
-        if not _audio_lock.acquire(blocking=False):
-            return                       # another alert is already playing, skip
         try:
-            engine = pyttsx3.init()
-            engine.setProperty('rate', 150)
-            engine.setProperty('volume', 1.0)
+            _engine = pyttsx3.init()
+            _engine.setProperty('rate', 150)
+            _engine.setProperty('volume', 1.0)
             if alert_type == "EAR":
-                engine.say("Drowsiness detected! Please take a break.")
+                _engine.say("Drowsiness detected! Please take a break.")
             else:
-                engine.say("Yawning detected. You seem tired. Please rest.")
-            engine.runAndWait()
-            engine.stop()
+                _engine.say("Yawning detected. You seem tired. Please rest.")
+            _engine.runAndWait()
+            _engine.stop()
         except Exception as e:
             print(f"[Audio] Alert failed: {e}")
-        finally:
-            _audio_lock.release()
-
     threading.Thread(target=speak, daemon=True).start()
 
 def init_db():
@@ -254,102 +236,105 @@ cap = cv2.VideoCapture(0)
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(WINDOW_NAME, 900, 660)
 
-while True:
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        break
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            break
 
-    # FPS
-    now       = time.perf_counter()
-    fps       = int(1 / max(now - prev_time, 1e-6))
-    prev_time = now
+        # FPS
+        now       = time.perf_counter()
+        fps       = int(1 / max(now - prev_time, 1e-6))
+        prev_time = now
 
-    frame = cv2.resize(frame, (900, 660))
-    gray  = np.ascontiguousarray(
-        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), dtype=np.uint8)
+        frame = cv2.resize(frame, (900, 660))
+        gray  = np.ascontiguousarray(
+            cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), dtype=np.uint8)
 
-    faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        faces = face_cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
-    ear    = 0.0
-    mar    = 0.0
-    status = "OK"
+        ear    = 0.0
+        mar    = 0.0
+        status = "OK"
 
-    if len(faces) == 0:
-        tw = cv2.getTextSize("No face detected — please face the camera",
-                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, 1)[0][0]
-        cv2.putText(frame, "No face detected — please face the camera",
-                    ((900-tw)//2, 350),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, C_ORANGE, 1, cv2.LINE_AA)
+        if len(faces) == 0:
+            tw = cv2.getTextSize("No face detected — please face the camera",
+                                 cv2.FONT_HERSHEY_SIMPLEX, 0.65, 1)[0][0]
+            cv2.putText(frame, "No face detected — please face the camera",
+                        ((900-tw)//2, 350),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.65, C_ORANGE, 1, cv2.LINE_AA)
 
-    for (x, y, w, h) in faces:
-        dlib_rect = dlib.rectangle(int(x), int(y), int(x+w), int(y+h))
-        try:
-            shape = predictor(gray, dlib_rect)
-            shape = face_utils.shape_to_np(shape)
-        except Exception:
-            continue
+        for (x, y, w, h) in faces:
+            dlib_rect = dlib.rectangle(int(x), int(y), int(x+w), int(y+h))
+            try:
+                shape = predictor(gray, dlib_rect)
+                shape = face_utils.shape_to_np(shape)
+            except Exception:
+                continue
 
-        leftEye  = shape[lStart:lEnd]
-        rightEye = shape[rStart:rEnd]
-        mouth    = shape[mStart:mEnd]
+            leftEye  = shape[lStart:lEnd]
+            rightEye = shape[rStart:rEnd]
+            mouth    = shape[mStart:mEnd]
 
-        ear = (eye_aspect_ratio(leftEye) + eye_aspect_ratio(rightEye)) / 2.0
-        mar = mouth_aspect_ratio(mouth)
+            ear = (eye_aspect_ratio(leftEye) + eye_aspect_ratio(rightEye)) / 2.0
+            mar = mouth_aspect_ratio(mouth)
 
-        # Draw clean contours
-        cv2.drawContours(frame, [cv2.convexHull(leftEye)],  -1, C_GREEN, 1)
-        cv2.drawContours(frame, [cv2.convexHull(rightEye)], -1, C_GREEN, 1)
-        cv2.drawContours(frame, [cv2.convexHull(mouth)],    -1, C_CYAN,  1)
+            # Draw clean contours
+            cv2.drawContours(frame, [cv2.convexHull(leftEye)],  -1, C_GREEN, 1)
+            cv2.drawContours(frame, [cv2.convexHull(rightEye)], -1, C_GREEN, 1)
+            cv2.drawContours(frame, [cv2.convexHull(mouth)],    -1, C_CYAN,  1)
 
-        # Clean face box — just corners not full rectangle
-        bx, by, bw, bh = x, y, w, h
-        ln = 18
-        clr = C_RED if status != "OK" else (0, 180, 255)
-        for px, py, dx, dy in [(bx,by,1,1),(bx+bw,by,-1,1),
-                                (bx,by+bh,1,-1),(bx+bw,by+bh,-1,-1)]:
-            cv2.line(frame, (px, py), (px+dx*ln, py), clr, 2)
-            cv2.line(frame, (px, py), (px, py+dy*ln), clr, 2)
+            # Clean face box — just corners not full rectangle
+            bx, by, bw, bh = x, y, w, h
+            ln = 18
+            clr = C_RED if status != "OK" else (0, 180, 255)
+            for px, py, dx, dy in [(bx,by,1,1),(bx+bw,by,-1,1),
+                                    (bx,by+bh,1,-1),(bx+bw,by+bh,-1,-1)]:
+                cv2.line(frame, (px, py), (px+dx*ln, py), clr, 2)
+                cv2.line(frame, (px, py), (px, py+dy*ln), clr, 2)
 
-        # EAR check
-        if ear < EAR_THRESHOLD:
-            ear_counter += 1
-            if ear_counter >= EAR_CONSEC_FRAMES:
-                status = "EAR"
-                if not ear_alert_logged:
-                    log_alert(session_id, "EAR", ear, mar, ear_counter)
-                    total_alerts += 1
-                    ear_alert_logged = True
-                    play_alert_sound("EAR")
-        else:
-            ear_counter      = 0
-            ear_alert_logged = False
+            # EAR check
+            if ear < EAR_THRESHOLD:
+                ear_counter += 1
+                if ear_counter >= EAR_CONSEC_FRAMES:
+                    status = "EAR"
+                    if not ear_alert_logged:
+                        log_alert(session_id, "EAR", ear, mar, ear_counter)
+                        total_alerts += 1
+                        ear_alert_logged = True
+                        play_alert_sound("EAR")
+            else:
+                ear_counter      = 0
+                ear_alert_logged = False
 
-        # MAR check
-        if mar > MAR_THRESHOLD:
-            mar_counter += 1
-            if mar_counter >= MAR_CONSEC_FRAMES:
-                if status == "OK": status = "MAR"
-                if not mar_alert_logged:
-                    log_alert(session_id, "MAR", ear, mar, mar_counter)
-                    total_alerts += 1
-                    mar_alert_logged = True
-                    play_alert_sound("MAR")
-        else:
-            mar_counter      = 0
-            mar_alert_logged = False
+            # MAR check
+            if mar > MAR_THRESHOLD:
+                mar_counter += 1
+                if mar_counter >= MAR_CONSEC_FRAMES:
+                    if status == "OK": status = "MAR"
+                    if not mar_alert_logged:
+                        log_alert(session_id, "MAR", ear, mar, mar_counter)
+                        total_alerts += 1
+                        mar_alert_logged = True
+                        play_alert_sound("MAR")
+            else:
+                mar_counter      = 0
+                mar_alert_logged = False
 
-    frame = draw_ui(frame, ear, mar, ear_counter, mar_counter,
-                    session_id, total_alerts, greeting, status, fps)
+        frame = draw_ui(frame, ear, mar, ear_counter, mar_counter,
+                        session_id, total_alerts, greeting, status, fps)
 
-    cv2.imshow(WINDOW_NAME, frame)
+        cv2.imshow(WINDOW_NAME, frame)
 
-    if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-        break
-    if cv2.waitKey(1) & 0xFF in [ord('q'), 27]:
-        break
+        if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+            break
+        if cv2.waitKey(1) & 0xFF in [ord('q'), 27]:
+            break
 
-cap.release()
-cv2.destroyAllWindows()
-end_session(session_id)
-print(f"Session {session_id} ended. Total alerts: {total_alerts}")
+finally:
+    # Always runs — whether the user pressed Q, ESC, Ctrl+C, or the app crashed
+    cap.release()
+    cv2.destroyAllWindows()
+    end_session(session_id)
+    print(f"Session {session_id} ended. Total alerts: {total_alerts}")
