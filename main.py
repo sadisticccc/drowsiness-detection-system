@@ -3,7 +3,7 @@ import dlib
 import numpy as np
 import sqlite3
 import threading
-#import pyttsx3
+import pyttsx3
 import time
 from datetime import datetime
 from scipy.spatial import distance as dist
@@ -37,20 +37,39 @@ def get_greeting():
     elif 17 <= hour < 21: return "Good Evening"
     else:                 return "Good Night"
 
+_tts_lock = threading.Lock()
+
 def play_alert_sound(alert_type="EAR"):
     def speak():
+        msg = ("Drowsiness detected! Please take a break."
+               if alert_type == "EAR"
+               else "Yawning detected. You seem tired. Please rest.")
+        # ── Try pyttsx3 (text-to-speech, works offline) ─────────────────
+        with _tts_lock:
+            try:
+                _engine = pyttsx3.init()
+                _engine.setProperty('rate', 145)
+                _engine.setProperty('volume', 1.0)
+                # Pick a clear voice if available
+                voices = _engine.getProperty('voices')
+                if voices:
+                    _engine.setProperty('voice', voices[0].id)
+                _engine.say(msg)
+                _engine.runAndWait()
+                _engine.stop()
+                return
+            except Exception as e:
+                print(f"[Audio] pyttsx3 failed: {e}")
+        # ── Fallback: system beep via winsound (Windows only) ────────────
         try:
-            _engine = pyttsx3.init()
-            _engine.setProperty('rate', 150)
-            _engine.setProperty('volume', 1.0)
-            if alert_type == "EAR":
-                _engine.say("Drowsiness detected! Please take a break.")
-            else:
-                _engine.say("Yawning detected. You seem tired. Please rest.")
-            _engine.runAndWait()
-            _engine.stop()
-        except Exception as e:
-            print(f"[Audio] Alert failed: {e}")
+            import winsound
+            freq = 1000 if alert_type == "EAR" else 800
+            winsound.Beep(freq, 800)
+            return
+        except Exception:
+            pass
+        # ── Fallback: print a visible terminal alert ──────────────────────
+        print(f"\a[ALERT] {msg}")   # \a rings the terminal bell
     threading.Thread(target=speak, daemon=True).start()
 
 def init_db():
