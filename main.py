@@ -68,11 +68,6 @@ def init_db():
             alert_type TEXT, ear_value REAL,
             mar_value REAL, duration_frames INTEGER,
             synced INTEGER DEFAULT 0)''')
-        # Close any sessions left open by a previous crash
-        c.execute("""
-            UPDATE sessions SET session_end = datetime('now')
-            WHERE session_end IS NULL
-        """)
         conn.commit()
         conn.close()
 
@@ -101,23 +96,19 @@ def log_alert(session_id, alert_type, ear, mar, frames):
         conn.commit()
         conn.close()
 
-def end_session(session_id, ear_samples):
-    """Close session. ear_samples is a list of EAR floats collected during the run."""
+def end_session(session_id):
     with db_lock:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         c = conn.cursor()
-        # Use live EAR samples if available, otherwise fall back to alert rows
-        if ear_samples:
-            avg_ear = round(sum(ear_samples) / len(ear_samples), 4)
-        else:
-            c.execute("""
-                SELECT AVG(ear_value) FROM alerts
-                WHERE session_id = ? AND ear_value IS NOT NULL
-            """, (session_id,))
-            row     = c.fetchone()
-            avg_ear = round(row[0], 4) if row and row[0] is not None else 0.0
         c.execute("""
-            UPDATE sessions SET session_end = ?, avg_ear = ? WHERE id = ?
+            SELECT COALESCE(AVG(ear_value), 0.0)
+            FROM alerts WHERE session_id=?
+        """, (session_id,))
+        avg_ear = round(c.fetchone()[0], 4)
+        c.execute("""
+            UPDATE sessions
+            SET session_end=?, avg_ear=?
+            WHERE id=?
         """, (datetime.now().isoformat(), avg_ear, session_id))
         conn.commit()
         conn.close()
@@ -236,7 +227,7 @@ mar_counter      = 0
 ear_alert_logged = False
 mar_alert_logged = False
 status           = "OK"
-ear_samples      = []   # live EAR readings for accurate avg_ear at session end
+fps_samples      = []   # collects FPS every frame to prove >=15 FPS requirement
 prev_time        = time.perf_counter() 
 
 print(f"{greeting}! Session {session_id} started.")
@@ -255,6 +246,8 @@ while True:
     now       = time.perf_counter()
     fps       = int(1 / max(now - prev_time, 1e-6))
     prev_time = now
+    if fps < 500:                  # ignore the first-frame spike
+        fps_samples.append(fps)
 
     frame = cv2.resize(frame, (900, 660))
     gray  = np.ascontiguousarray(
@@ -288,7 +281,6 @@ while True:
 
         ear = (eye_aspect_ratio(leftEye) + eye_aspect_ratio(rightEye)) / 2.0
         mar = mouth_aspect_ratio(mouth)
-        ear_samples.append(round(float(ear), 4))   # record for avg_ear
 
         # Draw clean contours
         cv2.drawContours(frame, [cv2.convexHull(leftEye)],  -1, C_GREEN, 1)
@@ -344,5 +336,29 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
-end_session(session_id, ear_samples)
+end_session(session_id)
 print(f"Session {session_id} ended. Total alerts: {total_alerts}")
+# ── FPS Performance Report ────────────────────────────────────────────────
+if fps_samples:
+    avg_fps = round(sum(fps_samples) / len(fps_samples), 2)
+    min_fps = min(fps_samples)
+    max_fps = max(fps_samples)
+    frames  = len(fps_samples)
+    passed  = "PASS" if avg_fps >= 15 else "FAIL"
+
+    report = (
+        f"=== FPS Performance Report - Session {session_id} ===\n"
+        f"Date       : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Frames     : {frames}\n"
+        f"Average FPS: {avg_fps}\n"
+        f"Min FPS    : {min_fps}\n"
+        f"Max FPS    : {max_fps}\n"
+        f"Requirement: >=15 FPS\n"
+        f"Result     : {passed}\n"
+        f"{'='*48}\n"
+    )
+    print(report)
+
+    # Append to fps_log.txt so every session is recorded
+    with open("fps_log.txt", "a") as f:
+        f.write(report)
