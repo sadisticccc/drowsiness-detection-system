@@ -4,6 +4,7 @@ import numpy as np
 import sqlite3
 import threading
 import pyttsx3
+import queue as _queue
 import time
 import math
 from datetime import datetime
@@ -12,49 +13,86 @@ from imutils import face_utils
 
 db_lock = threading.Lock()
 
-# ── Constants ───────────────────────────────────────────────────────────
-EAR_THRESHOLD     = 0.25
-MAR_THRESHOLD     = 0.6
-EAR_CONSEC_FRAMES = 20
-MAR_CONSEC_FRAMES = 15
-PREDICTOR_PATH    = "shape_predictor_68_face_landmarks.dat"
-WINDOW_NAME       = "DrowsGuard"
-DB_PATH           = "drowsiness.db"
+# ── Detection Thresholds ─────────────────────────────────────────────────
+EAR_THRESHOLD      = 0.25
+MAR_THRESHOLD      = 0.5
+EAR_CONSEC_FRAMES  = 20
+MAR_CONSEC_FRAMES  = 8
+YAWNS_BEFORE_ALERT = 3
+PREDICTOR_PATH     = "shape_predictor_68_face_landmarks.dat"
+WINDOW_NAME        = "DrowsGuard"
+DB_PATH            = "drowsiness.db"
 
-# ── Weighted Drowsiness Score ────────────────────────────────────────────
-# Instead of counting plain frames, we accumulate a score based on HOW
-# closed the eyes are. Deep closure = score rises fast = faster alert.
-# A normal blink barely moves the score; real drowsiness triggers quickly.
-DROWSY_SCORE_THRESHOLD = 3.0   # total score needed to fire EAR alert
-DROWSY_SCORE_DECAY     = 0.3   # score drops this much every frame eyes are open
-MAR_SCORE_THRESHOLD    = 2.0   # same idea for yawning
-MAR_SCORE_DECAY        = 0.2
+# ── Colour Palette (BGR) ─────────────────────────────────────────────────
+C_BG     = (8,   10,  14)
+C_PANEL  = (18,  22,  30)
+C_BORDER = (45,  55,  75)
+C_ACCENT = (0,   210, 255)
+C_ACCENT2= (0,   160, 255)
+C_GREEN  = (80,  220, 130)
+C_AMBER  = (30,  160, 255)
+C_RED    = (55,  65,  230)
+C_WHITE  = (245, 248, 252)
+C_MUTED  = (100, 115, 140)
+C_DIM    = (55,  65,  85)
+C_VIOLET = (210, 100, 180)
 
-# ── Yawn Counter ─────────────────────────────────────────────────────────
-# 1-2 yawns are normal — completely ignored.
-# Only on the 3rd yawn does the system alert the driver.
-# A yawn is counted only when a full MAR event COMPLETES
-# (mouth opens fully then closes again) — not while mouth is open.
-YAWNS_BEFORE_ALERT  = 3     # alert fires on this yawn number
-YAWN_RESET_SECONDS  = 300   # yawn count resets after 5 mins of no yawning
+# ════════════════════════════════════════════════════════════════════════
+#  AUDIO — single persistent engine on dedicated thread
+# ════════════════════════════════════════════════════════════════════════
+_audio_q       = _queue.Queue()
+_audio_playing = False
 
-# ── Luxury Dark Palette (BGR) ────────────────────────────────────────────
-C_BG          = (8, 10, 14)          # near-black base
-C_PANEL       = (18, 22, 30)         # card background
-C_PANEL2      = (24, 30, 42)         # slightly lighter card
-C_BORDER      = (45, 55, 75)         # subtle border
-C_ACCENT      = (0, 210, 255)        # electric cyan — primary accent
-C_ACCENT2     = (0, 160, 255)        # deeper cyan
-C_GREEN       = (80, 220, 130)       # safe/good
-C_AMBER       = (30, 160, 255)       # warning amber
-C_RED         = (55, 65, 230)        # alert red
-C_WHITE       = (245, 248, 252)      # pure text
-C_MUTED       = (100, 115, 140)      # secondary text
-C_DIM         = (55, 65, 85)         # very muted
-C_GOLD        = (40, 185, 255)       # accent gold-amber
-C_VIOLET      = (210, 100, 180)      # MAR/yawn violet
+def _audio_worker():
+    global _audio_playing
+    while True:
+        msg = _audio_q.get()
+        if msg is None:
+            break
+        try:
+            _audio_playing = True
+            engine = pyttsx3.init()
+            voices = engine.getProperty('voices')
+            if len(voices) > 1:
+                engine.setProperty('voice', voices[1].id)
+            engine.setProperty('rate',   130)
+            engine.setProperty('volume', 0.9)
+            engine.say(msg)
+            engine.runAndWait()
+            engine.stop()
+        except Exception as e:
+            print(f"[Audio] Speech failed: {e}")
+        finally:
+            _audio_playing = False
+            _audio_q.task_done()
 
-# Overlay alpha blending helpers
+threading.Thread(target=_audio_worker, daemon=True).start()
+
+_audio_lock = threading.Lock()
+
+def play_alert_sound(alert_type="EAR"):
+    msg = ("Please stay alert. Drowsiness has been detected."
+           if alert_type == "EAR"
+           else "You appear to be fatigued. Please consider taking a rest.")
+    def _speak():
+        with _audio_lock:
+            try:
+                e = pyttsx3.init()
+                voices = e.getProperty('voices')
+                if len(voices) > 1:
+                    e.setProperty('voice', voices[1].id)
+                e.setProperty('rate', 130)
+                e.setProperty('volume', 0.9)
+                e.say(msg)
+                e.runAndWait()
+                e.stop()
+            except Exception as ex:
+                print(f"[Audio] {ex}")
+    threading.Thread(target=_speak, daemon=True).start()
+
+# ════════════════════════════════════════════════════════════════════════
+#  DRAWING UTILITIES
+# ════════════════════════════════════════════════════════════════════════
 def blend(img, overlay, alpha):
     cv2.addWeighted(overlay, alpha, img, 1 - alpha, 0, img)
 
@@ -66,14 +104,6 @@ def filled_rect(img, pt1, pt2, color, alpha=1.0):
         cv2.rectangle(ov, pt1, pt2, color, -1)
         blend(img, ov, alpha)
 
-def draw_line(img, pt1, pt2, color, thickness=1, alpha=1.0):
-    if alpha >= 1.0:
-        cv2.line(img, pt1, pt2, color, thickness, cv2.LINE_AA)
-    else:
-        ov = img.copy()
-        cv2.line(ov, pt1, pt2, color, thickness, cv2.LINE_AA)
-        blend(img, ov, alpha)
-
 def put_text(img, text, pos, scale, color, thickness=1, font=cv2.FONT_HERSHEY_SIMPLEX):
     cv2.putText(img, text, pos, font, scale, color, thickness, cv2.LINE_AA)
 
@@ -83,391 +113,254 @@ def put_duplex(img, text, pos, scale, color, thickness=1):
 def text_size(text, scale, thickness=1, font=cv2.FONT_HERSHEY_SIMPLEX):
     return cv2.getTextSize(text, font, scale, thickness)[0]
 
-# ── Animated arc / ring drawing ──────────────────────────────────────────
 def draw_arc(img, center, radius, start_angle, end_angle, color, thickness=2, alpha=1.0):
     ov = img.copy() if alpha < 1.0 else img
-    cv2.ellipse(ov, center, (radius, radius), -90, start_angle, end_angle, color, thickness, cv2.LINE_AA)
+    cv2.ellipse(ov, center, (radius, radius), -90, start_angle, end_angle,
+                color, thickness, cv2.LINE_AA)
     if alpha < 1.0:
         blend(img, ov, alpha)
 
-def draw_ring_gauge(img, cx, cy, radius, value, vmin, vmax, color_low, color_high,
-                    label, val_str, warn=False, tick_color=None):
-    """Draw a circular gauge ring — used for EAR and MAR."""
+def draw_ring_gauge(img, cx, cy, radius, value, vmin, vmax,
+                    color_low, color_high, label, val_str, warn=False):
     pct  = max(0.0, min(1.0, (value - vmin) / (vmax - vmin)))
-    span = 240.0  # degrees of arc
+    span = 240.0
     fill = span * pct
-
-    # Track ring (background arc)
-    draw_arc(img, (cx, cy), radius,     0,    span, C_DIM,    3, 0.6)
-    # Tick marks
+    draw_arc(img, (cx, cy), radius, 0, span, C_DIM, 3, 0.6)
     for i in range(9):
         angle = math.radians(-90 + (i / 8) * span)
-        ix = int(cx + (radius + 7) * math.cos(angle))
-        iy = int(cy + (radius + 7) * math.sin(angle))
+        ix = int(cx + (radius + 7)  * math.cos(angle))
+        iy = int(cy + (radius + 7)  * math.sin(angle))
         ox = int(cx + (radius + 11) * math.cos(angle))
         oy = int(cy + (radius + 11) * math.sin(angle))
-        tc = tick_color if tick_color else C_DIM
-        cv2.line(img, (ix, iy), (ox, oy), tc, 1, cv2.LINE_AA)
-
-    # Filled arc
+        cv2.line(img, (ix, iy), (ox, oy), C_DIM, 1, cv2.LINE_AA)
     col = color_high if warn else color_low
     if fill > 0:
         draw_arc(img, (cx, cy), radius, 0, fill, col, 3)
-
-    # Glow dot at tip
-    if fill > 0:
         tip_angle = math.radians(-90 + fill)
         tx = int(cx + radius * math.cos(tip_angle))
         ty = int(cy + radius * math.sin(tip_angle))
         cv2.circle(img, (tx, ty), 5, col, -1, cv2.LINE_AA)
-        cv2.circle(img, (tx, ty), 8, col, 1, cv2.LINE_AA)
-
-    # Center value
+        cv2.circle(img, (tx, ty), 8, col,  1, cv2.LINE_AA)
     tw, th = text_size(val_str, 0.7, 2, cv2.FONT_HERSHEY_DUPLEX)
     put_duplex(img, val_str, (cx - tw//2, cy + th//2 - 2), 0.7, col, 2)
+    lw = text_size(label, 0.28)[0]
+    put_text(img, label, (cx - lw//2, cy + radius + 18), 0.28, C_MUTED)
 
-    # Label below
-    lw = text_size(label, 0.32)[0]
-    put_text(img, label, (cx - lw//2, cy + radius + 18), 0.32, C_MUTED)
-
-
-# ── Corner bracket face box ──────────────────────────────────────────────
 def draw_face_bracket(img, x, y, w, h, color, ln=22, thick=2, pulse=False):
     if pulse:
         ov = img.copy()
         cv2.rectangle(ov, (x, y), (x+w, y+h), color, 1)
         blend(img, ov, 0.15)
-    for px, py, dx, dy in [(x, y, 1, 1), (x+w, y, -1, 1), (x, y+h, 1, -1), (x+w, y+h, -1, -1)]:
-        cv2.line(img, (px, py), (px + dx*ln, py), color, thick, cv2.LINE_AA)
-        cv2.line(img, (px, py), (px, py + dy*ln), color, thick, cv2.LINE_AA)
-        # Corner dot
+    for px, py, dx, dy in [(x,y,1,1),(x+w,y,-1,1),(x,y+h,1,-1),(x+w,y+h,-1,-1)]:
+        cv2.line(img, (px, py), (px+dx*ln, py), color, thick, cv2.LINE_AA)
+        cv2.line(img, (px, py), (px, py+dy*ln), color, thick, cv2.LINE_AA)
         cv2.circle(img, (px, py), 3, color, -1, cv2.LINE_AA)
 
-
-# ── Micro stat card ──────────────────────────────────────────────────────
-def draw_stat_card(img, x, y, w, h, label, value, sub="", accent=C_ACCENT,
-                   bar_pct=None, alert=False):
-    # Card background
+def draw_stat_card(img, x, y, w, h, label, value, accent=None, bar_pct=None, alert=False):
+    if accent is None:
+        accent = C_ACCENT
     filled_rect(img, (x, y), (x+w, y+h), C_PANEL, 0.92)
-    # Left accent bar
     filled_rect(img, (x, y+4), (x+2, y+h-4), accent)
-    # Top separator line
     cv2.line(img, (x, y), (x+w, y), accent if alert else C_BORDER, 1, cv2.LINE_AA)
-
-    label_y = y + 16
+    put_text(img, label, (x+10, y+16), 0.28, C_MUTED)
     value_y = y + h - (20 if bar_pct is not None else 14)
-
-    put_text(img, label, (x+10, label_y), 0.30, C_MUTED)
-    put_duplex(img, value, (x+10, value_y), 0.60, accent, 1)
-    if sub:
-        sw = text_size(sub, 0.28)[0]
-        put_text(img, sub, (x+w-sw-6, value_y), 0.28, C_DIM)
-
+    put_duplex(img, value, (x+10, value_y), 0.58, accent, 1)
     if bar_pct is not None:
-        bar_x = x + 8
-        bar_y = y + h - 8
-        bar_w = w - 16
-        filled_rect(img, (bar_x, bar_y), (bar_x + bar_w, bar_y + 3), C_DIM)
-        fill_w = int(bar_w * min(max(bar_pct, 0), 1))
-        if fill_w > 0:
-            filled_rect(img, (bar_x, bar_y), (bar_x + fill_w, bar_y + 3), accent)
-
-
-# ── Heartbeat / pulse line ────────────────────────────────────────────────
-_pulse_offset = 0
+        bx, by_b, bw_b = x+8, y+h-8, w-16
+        filled_rect(img, (bx, by_b), (bx+bw_b, by_b+3), C_DIM)
+        fw = int(bw_b * min(max(bar_pct, 0), 1))
+        if fw > 0:
+            filled_rect(img, (bx, by_b), (bx+fw, by_b+3), accent)
 
 def draw_pulse_line(img, x, y, w, h, value, color, history):
-    """Draw a mini EKG-style history line."""
     history.append(value)
     if len(history) > w:
         history.pop(0)
     if len(history) < 2:
         return
-    pts = []
-    for i, v in enumerate(history):
-        px = x + int(i * w / max(len(history)-1, 1))
-        py = y + h - int(v * h)
-        pts.append((px, py))
+    pts = [(x + int(i * w / max(len(history)-1, 1)),
+            y + h - int(v * h))
+           for i, v in enumerate(history)]
     for i in range(1, len(pts)):
         alpha = 0.4 + 0.6 * (i / len(pts))
-        col = tuple(int(c * alpha) for c in color)
+        col   = tuple(int(c * alpha) for c in color)
         cv2.line(img, pts[i-1], pts[i], col, 1, cv2.LINE_AA)
 
-
-# ── Alert banner ──────────────────────────────────────────────────────────
 _alert_anim = 0.0
 
 def draw_alert_banner(img, w, status, frame_count):
     global _alert_anim
-    if status == "OK":
-        _alert_anim = max(0.0, _alert_anim - 0.08)
-    else:
-        _alert_anim = min(1.0, _alert_anim + 0.12)
-
+    _alert_anim = max(0.0, _alert_anim - 0.08) if status == "OK" \
+                  else min(1.0, _alert_anim + 0.12)
     if _alert_anim < 0.05:
         return
-
     pulse = 0.7 + 0.3 * abs(math.sin(frame_count * 0.15))
     alpha = _alert_anim * pulse
-
     if status == "EAR":
-        bg_col  = (40, 40, 180)
-        border  = (80, 80, 240)
-        icon    = "◉ DROWSINESS ALERT"
-        sub     = "EYES CLOSING DETECTED — PLEASE STAY ALERT"
+        bg_col, border = (40, 40, 180), (80, 80, 240)
+        icon = "!! DROWSINESS ALERT"
+        sub  = "EYES CLOSING DETECTED — PLEASE STAY ALERT"
     elif status == "MAR":
-        bg_col  = (120, 50, 180)
-        border  = (160, 80, 220)
-        icon    = "◎ FATIGUE ALERT"
-        sub     = "YAWNING DETECTED — CONSIDER TAKING A BREAK"
+        bg_col, border = (120, 50, 180), (160, 80, 220)
+        icon = "!! FATIGUE ALERT"
+        sub  = "YAWNING DETECTED — CONSIDER TAKING A BREAK"
     else:
         return
-
     filled_rect(img, (0, 62), (w, 106), bg_col, alpha * 0.88)
-    cv2.line(img, (0, 62), (w, 62), border, 1, cv2.LINE_AA)
+    cv2.line(img, (0,  62), (w,  62), border, 1, cv2.LINE_AA)
     cv2.line(img, (0, 106), (w, 106), border, 1, cv2.LINE_AA)
-
     iw = text_size(icon, 0.65, 2, cv2.FONT_HERSHEY_DUPLEX)[0]
-    put_duplex(img, icon, ((w - iw)//2, 84), 0.65, C_WHITE, 2)
+    put_duplex(img, icon, ((w-iw)//2, 84), 0.65, C_WHITE, 2)
     sw = text_size(sub, 0.33)[0]
-    put_text(img, sub, ((w - sw)//2, 100), 0.33, C_WHITE)
+    put_text(img, sub, ((w-sw)//2, 100), 0.33, C_WHITE)
 
-
-# ── Top HUD bar ────────────────────────────────────────────────────────────
-def draw_top_bar(img, w, session_id, fps, greeting, frame_count):
+def draw_top_bar(img, w, session_id, fps, greeting, cam_name, frame_count):
     filled_rect(img, (0, 0), (w, 56), C_BG, 0.97)
     cv2.line(img, (0, 56), (w, 56), C_BORDER, 1, cv2.LINE_AA)
-
-    # ── Left: Logo ──
-    # Animated logo dot — subtle pulse
     pulse_r = 6 + int(2 * abs(math.sin(frame_count * 0.05)))
-    cv2.circle(img, (20, 28), pulse_r, C_ACCENT, -1, cv2.LINE_AA)
-    cv2.circle(img, (20, 28), pulse_r + 3, C_ACCENT, 1, cv2.LINE_AA)
-    put_duplex(img, "DROWSGUARD", (36, 34), 0.62, C_ACCENT, 1)
-    put_text(img, "AI MONITOR v2.0", (38, 48), 0.25, C_MUTED)
-
-    # ── Center: Time + greeting ──
+    cv2.circle(img, (20, 28), pulse_r,     C_ACCENT, -1, cv2.LINE_AA)
+    cv2.circle(img, (20, 28), pulse_r + 3, C_ACCENT,  1, cv2.LINE_AA)
+    put_duplex(img, "DROWSGUARD",     (36, 33), 0.60, C_ACCENT, 1)
+    put_text(img,   "AI MONITOR v2.0",(38, 48), 0.25, C_MUTED)
     now_str    = datetime.now().strftime("%H:%M:%S")
     date_str   = datetime.now().strftime("%a %d %b %Y").upper()
-    center_txt = f"{greeting.upper()}  ·  {now_str}"
+    center_txt = f"{greeting.upper()}  |  {now_str}"
     cw = text_size(center_txt, 0.46)[0]
-    put_text(img, center_txt, ((w - cw)//2, 30), 0.46, C_WHITE)
+    put_text(img, center_txt, ((w-cw)//2, 30), 0.46, C_WHITE)
     dw = text_size(date_str, 0.27)[0]
-    put_text(img, date_str, ((w - dw)//2, 46), 0.27, C_MUTED)
-
-    # ── Right: Session + FPS indicator ──
+    put_text(img, date_str, ((w-dw)//2, 46), 0.27, C_MUTED)
     fps_color = C_GREEN if fps >= 15 else (C_AMBER if fps >= 10 else C_RED)
-    sess_str = f"SESSION #{session_id:02d}"
-    fps_str  = f"{fps} FPS"
-    put_text(img, sess_str, (w - 160, 28), 0.36, C_MUTED)
+    put_text(img, f"SESSION #{session_id:02d}", (w-180, 24), 0.34, C_MUTED)
+    put_text(img, cam_name[:18],               (w-180, 38), 0.28, C_DIM)
+    fps_str = f"{fps} FPS"
     sw = text_size(fps_str, 0.42)[0]
-    put_duplex(img, fps_str, (w - sw - 14, 44), 0.42, fps_color)
-
-    # FPS mini-bar (5 segments)
-    seg_w = 8
+    put_duplex(img, fps_str, (w-sw-14, 52), 0.42, fps_color)
     for i in range(5):
-        seg_on = (fps / 30.0) > (i / 5.0)
-        col    = fps_color if seg_on else C_DIM
-        bx     = w - 168 + i * 10
-        filled_rect(img, (bx, 36), (bx + seg_w, 40), col)
+        col = fps_color if (fps/30.0) > (i/5.0) else C_DIM
+        bx  = w - 188 + i * 10
+        filled_rect(img, (bx, 40), (bx+8, 44), col)
 
-
-# ── Bottom HUD ─────────────────────────────────────────────────────────────
 def draw_bottom_hud(img, h, w, ear, mar, ear_counter, mar_counter,
                     total_alerts, status, frame_count,
-                    ear_history, mar_history,
-                    drowsy_score=0.0, mar_score=0.0,
-                    yawn_count=0):
-    bh  = 130    # bottom panel height
-    by  = h - bh
+                    ear_history, mar_history, yawn_count=0):
+    bh = 140
+    by = h - bh
     filled_rect(img, (0, by), (w, h), C_BG, 0.96)
     cv2.line(img, (0, by), (w, by), C_BORDER, 1, cv2.LINE_AA)
 
-    # ── EAR ring gauge ─────────────────────────────────────────────────
-    ear_warn   = ear < EAR_THRESHOLD
-    ear_color  = C_RED if ear_warn else C_GREEN
-    draw_ring_gauge(img, 70, by + 60, 44,
-                    ear, 0.0, 0.5,
-                    C_GREEN, C_RED,
-                    "EYE ASPECT RATIO", f"{ear:.3f}",
-                    warn=ear_warn)
-
-    # EAR frame progress arc
+    # EAR ring gauge
+    ear_warn = ear < EAR_THRESHOLD
+    draw_ring_gauge(img, 72, by+65, 46, ear, 0.0, 0.5,
+                    C_GREEN, C_RED, "EYE ASPECT RATIO", f"{ear:.3f}", warn=ear_warn)
     ear_pct = ear_counter / EAR_CONSEC_FRAMES
     if ear_pct > 0:
-        draw_arc(img, (70, by + 60), 52, 0, ear_pct * 240, C_RED, 2, 0.7)
+        draw_arc(img, (72, by+65), 54, 0, ear_pct*240, C_RED, 2, 0.7)
 
-    # ── MAR ring gauge ──────────────────────────────────────────────────
-    mar_warn  = mar > MAR_THRESHOLD
-    mar_color = C_VIOLET if mar_warn else C_ACCENT
-    draw_ring_gauge(img, 195, by + 60, 44,
-                    mar, 0.0, 1.0,
-                    C_ACCENT, C_VIOLET,
-                    "MOUTH ASPECT RATIO", f"{mar:.3f}",
-                    warn=mar_warn)
+    # MAR ring gauge
+    mar_warn = mar > MAR_THRESHOLD
+    draw_ring_gauge(img, 200, by+65, 46, mar, 0.0, 1.5,
+                    C_ACCENT, C_VIOLET, "MOUTH ASPECT RATIO", f"{mar:.3f}", warn=mar_warn)
 
-    mar_pct = mar_counter / MAR_CONSEC_FRAMES
-    if mar_pct > 0:
-        draw_arc(img, (195, by + 60), 52, 0, mar_pct * 240, C_VIOLET, 2, 0.7)
+    cv2.line(img, (275, by+15), (275, h-10), C_BORDER, 1, cv2.LINE_AA)
 
-    # ── Divider ─────────────────────────────────────────────────────────
-    cv2.line(img, (270, by + 15), (270, h - 15), C_BORDER, 1, cv2.LINE_AA)
+    # EAR waveform
+    put_text(img, "EAR SIGNAL", (288, by+18), 0.27, C_MUTED)
+    draw_pulse_line(img, 288, by+22, 175, 58,
+                    min(max(ear/0.5, 0), 1.0), list(C_GREEN), ear_history)
+    th_y = by + 22 + 58 - int((EAR_THRESHOLD/0.5)*58)
+    cv2.line(img, (288, th_y), (463, th_y), C_RED, 1, cv2.LINE_AA)
+    put_text(img, "THRESHOLD", (466, th_y+4), 0.22, C_RED)
 
-    # ── EAR pulse waveform ───────────────────────────────────────────────
-    put_text(img, "EAR SIGNAL", (285, by + 18), 0.27, C_MUTED)
-    ear_norm = min(max(ear / 0.5, 0), 1.0)
-    draw_pulse_line(img, 285, by + 22, 180, 60, ear_norm, list(C_GREEN), ear_history)
-    # Threshold line
-    th_y = by + 22 + 60 - int((EAR_THRESHOLD / 0.5) * 60)
-    cv2.line(img, (285, th_y), (465, th_y), C_RED, 1, cv2.LINE_AA)
-    put_text(img, "THRESHOLD", (468, th_y + 4), 0.22, C_RED)
+    # MAR waveform
+    put_text(img, "MAR SIGNAL", (288, by+90), 0.27, C_MUTED)
+    draw_pulse_line(img, 288, by+94, 175, 38,
+                    min(max(mar/1.5, 0), 1.0), list(C_ACCENT2), mar_history)
 
-    # ── MAR pulse waveform ───────────────────────────────────────────────
-    put_text(img, "MAR SIGNAL", (285, by + 92), 0.27, C_MUTED)
-    mar_norm = min(max(mar / 1.0, 0), 1.0)
-    draw_pulse_line(img, 285, by + 96, 180, 30, mar_norm, list(C_ACCENT2), mar_history)
+    cv2.line(img, (475, by+15), (475, h-10), C_BORDER, 1, cv2.LINE_AA)
 
-    # ── Divider ──────────────────────────────────────────────────────────
-    cv2.line(img, (510, by + 15), (510, h - 15), C_BORDER, 1, cv2.LINE_AA)
+    # Alert count card
+    alert_col = C_GREEN if total_alerts == 0 else (C_AMBER if total_alerts < 5 else C_RED)
+    draw_stat_card(img, 485, by+8,  120, 58, "TOTAL ALERTS",
+                   str(total_alerts), accent=alert_col, alert=(total_alerts > 0))
 
-    # ── Alert counter + status ──────────────────────────────────────────
-    alert_color = C_GREEN if total_alerts == 0 else (C_AMBER if total_alerts < 5 else C_RED)
-    draw_stat_card(img, 520, by + 8, 115, 55, "TOTAL ALERTS",
-                   str(total_alerts), accent=alert_color, alert=(total_alerts > 0))
-
-    # Yawn counter card — shows e.g. "2 / 3" building toward alert
-    yawn_col = C_GREEN if yawn_count == 0 else (C_AMBER if yawn_count < YAWNS_BEFORE_ALERT else C_VIOLET)
-    draw_stat_card(img, 520, by + 68, 115, 55, "YAWNS",
+    # Yawn progress card
+    yawn_col = C_GREEN if yawn_count == 0 else \
+               (C_AMBER if yawn_count < YAWNS_BEFORE_ALERT else C_VIOLET)
+    draw_stat_card(img, 485, by+72, 120, 58, f"YAWNS  {yawn_count}/{YAWNS_BEFORE_ALERT}",
                    f"{yawn_count} / {YAWNS_BEFORE_ALERT}",
-                   bar_pct=yawn_count / YAWNS_BEFORE_ALERT,
-                   accent=yawn_col)
+                   accent=yawn_col,
+                   bar_pct=yawn_count / YAWNS_BEFORE_ALERT)
 
-    # ── Driver status ────────────────────────────────────────────────────
-    cv2.line(img, (648, by + 15), (648, h - 15), C_BORDER, 1, cv2.LINE_AA)
+    cv2.line(img, (618, by+15), (618, h-10), C_BORDER, 1, cv2.LINE_AA)
 
+    # Driver status
     status_map = {
-        "OK":  ("DRIVER SAFE",   "MONITORING ACTIVE",  C_GREEN),
-        "EAR": ("DROWSY",        "EYES CLOSING",        C_RED),
-        "MAR": ("FATIGUED",      "YAWNING DETECTED",    C_VIOLET),
+        "OK":  ("DRIVER SAFE",  "MONITORING ACTIVE",  C_GREEN),
+        "EAR": ("DROWSY",       "EYES CLOSING",        C_RED),
+        "MAR": ("FATIGUED",     "YAWNING DETECTED",    C_VIOLET),
     }
     st_label, st_sub, st_color = status_map.get(status, status_map["OK"])
-
-    # Animated status indicator
-    pulse = 0.6 + 0.4 * abs(math.sin(frame_count * 0.1))
-    radius = 10
-    sty = by + 45
-    stx = 700
-    cv2.circle(img, (stx, sty), radius + 5, st_color, 1, cv2.LINE_AA)
-    cv2.circle(img, (stx, sty), radius,     st_color, -1, cv2.LINE_AA)
+    pulse  = 0.6 + 0.4 * abs(math.sin(frame_count * 0.1))
+    stx, sty = 670, by + 50
+    cv2.circle(img, (stx, sty), 15, st_color, 1,  cv2.LINE_AA)
+    cv2.circle(img, (stx, sty), 10, st_color, -1, cv2.LINE_AA)
     if status != "OK":
         ov = img.copy()
-        cv2.circle(ov, (stx, sty), radius + 14, st_color, 2)
+        cv2.circle(ov, (stx, sty), 24, st_color, 2)
         blend(img, ov, pulse * 0.5)
+    put_duplex(img, st_label, (stx+25, sty+6),  0.52, st_color, 1)
+    put_text(img,  st_sub,   (stx+25, sty+22), 0.28, C_MUTED)
+    put_text(img, f"LIVE  {datetime.now().strftime('%H:%M:%S')}",
+             (stx+25, by+90), 0.28, C_DIM)
 
-    put_duplex(img, st_label, (stx + 22, sty + 5), 0.52, st_color, 1)
-    put_text(img,  st_sub,   (stx + 22, sty + 20), 0.28, C_MUTED)
-
-    # Session info
-    now_sec = datetime.now().strftime("%H:%M:%S")
-    put_text(img, f"LIVE  {now_sec}", (stx + 22, by + 85), 0.28, C_DIM)
-
-    # ── Bottom right: branding micro tag ─────────────────────────────────
-    tag = "DROWSGUARD · REAL-TIME BIOMETRIC MONITORING"
+    tag = "DROWSGUARD — REAL-TIME BIOMETRIC MONITORING"
     tw  = text_size(tag, 0.24)[0]
-    put_text(img, tag, (w - tw - 10, h - 6), 0.24, C_DIM)
+    put_text(img, tag, (w-tw-10, h-5), 0.24, C_DIM)
 
-
-# ── Face landmarks overlay ─────────────────────────────────────────────────
 def draw_landmarks(frame, shape, status):
-    lStart, lEnd = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
-    rStart, rEnd = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
-    mStart, mEnd = face_utils.FACIAL_LANDMARKS_IDXS["inner_mouth"]
-
-    left_eye  = shape[lStart:lEnd]
-    right_eye = shape[rStart:rEnd]
-    mouth     = shape[mStart:mEnd]
-
-    eye_col   = C_RED if status == "EAR" else C_GREEN
+    lS, lE = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
+    rS, rE = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
+    mS, mE = face_utils.FACIAL_LANDMARKS_IDXS["mouth"]
+    left_eye  = shape[lS:lE]
+    right_eye = shape[rS:rE]
+    mouth_pts = shape[mS:mE]
+    eye_col   = C_RED    if status == "EAR" else C_GREEN
     mouth_col = C_VIOLET if status == "MAR" else C_ACCENT
-
-    # Convex hull overlays
     ov = frame.copy()
     cv2.fillConvexPoly(ov, cv2.convexHull(left_eye),  eye_col)
     cv2.fillConvexPoly(ov, cv2.convexHull(right_eye), eye_col)
-    cv2.fillConvexPoly(ov, cv2.convexHull(mouth),     mouth_col)
+    cv2.fillConvexPoly(ov, cv2.convexHull(mouth_pts), mouth_col)
     blend(frame, ov, 0.18)
-
-    # Outline
     cv2.drawContours(frame, [cv2.convexHull(left_eye)],  -1, eye_col,   1, cv2.LINE_AA)
     cv2.drawContours(frame, [cv2.convexHull(right_eye)], -1, eye_col,   1, cv2.LINE_AA)
-    cv2.drawContours(frame, [cv2.convexHull(mouth)],     -1, mouth_col, 1, cv2.LINE_AA)
-
-    # Individual landmark dots
+    cv2.drawContours(frame, [cv2.convexHull(mouth_pts)], -1, mouth_col, 1, cv2.LINE_AA)
     for pt in np.concatenate([left_eye, right_eye]):
         cv2.circle(frame, tuple(pt), 2, eye_col, -1, cv2.LINE_AA)
-    for pt in mouth:
+    for pt in mouth_pts:
         cv2.circle(frame, tuple(pt), 2, mouth_col, -1, cv2.LINE_AA)
 
+def draw_corner_reticles(frame, w, h, bottom_hud_h=140, top_bar_h=56):
+    vx1, vy1, vx2, vy2 = 0, top_bar_h, w, h - bottom_hud_h
+    ln, col = 14, C_BORDER
+    for px, py, dx, dy in [(vx1,vy1,1,1),(vx2,vy1,-1,1),(vx1,vy2,1,-1),(vx2,vy2,-1,-1)]:
+        cv2.line(frame, (px, py), (px+dx*ln, py), col, 1, cv2.LINE_AA)
+        cv2.line(frame, (px, py), (px, py+dy*ln), col, 1, cv2.LINE_AA)
 
-# ── No-face overlay ──────────────────────────────────────────────────────
-def draw_no_face(frame, w, h):
-    msg = "NO FACE DETECTED"
-    sub = "PLEASE FACE THE CAMERA"
-    mw = text_size(msg, 0.7, 2, cv2.FONT_HERSHEY_DUPLEX)[0]
-    sw = text_size(sub, 0.32)[0]
-    cy = h // 2
-    filled_rect(frame, ((w - mw)//2 - 20, cy - 30), ((w + mw)//2 + 20, cy + 30), C_PANEL, 0.8)
-    put_duplex(frame, msg, ((w - mw)//2, cy + 5), 0.7, C_AMBER, 2)
-    put_text(frame, sub, ((w - sw)//2, cy + 24), 0.32, C_MUTED)
-
-
-# ── Scanline overlay (luxury CRT effect) ───────────────────────────────────
-def draw_scanlines(frame, h, w, strength=0.04):
+def draw_scanlines(frame, h, w, strength=0.03):
     ov = np.zeros_like(frame)
     for y in range(0, h, 4):
         cv2.line(ov, (0, y), (w, y), (0, 0, 0), 1)
     cv2.addWeighted(frame, 1.0, ov, strength, 0, frame)
 
-
-# ── Corner reticle overlays ───────────────────────────────────────────────
-def draw_corner_reticles(frame, w, h, bottom_hud_h=130, top_bar_h=56):
-    """Thin reticle marks at video area corners."""
-    vx1, vy1 = 0, top_bar_h
-    vx2, vy2 = w, h - bottom_hud_h
-    ln, col = 16, C_BORDER
-    for px, py, dx, dy in [(vx1, vy1, 1, 1), (vx2, vy1, -1, 1),
-                            (vx1, vy2, 1, -1), (vx2, vy2, -1, -1)]:
-        cv2.line(frame, (px, py), (px + dx*ln, py), col, 1, cv2.LINE_AA)
-        cv2.line(frame, (px, py), (px, py + dy*ln), col, 1, cv2.LINE_AA)
-
-
-# ────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════
 #  DATABASE
-# ────────────────────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════
 def get_greeting():
     hour = datetime.now().hour
     if   5  <= hour < 12: return "Good Morning"
     elif 12 <= hour < 17: return "Good Afternoon"
     elif 17 <= hour < 21: return "Good Evening"
     else:                 return "Good Night"
-
-def play_alert_sound(alert_type="EAR"):
-    def speak():
-        try:
-            _engine = pyttsx3.init()
-            voices  = _engine.getProperty('voices')
-            _engine.setProperty('voice', voices[1].id)
-            _engine.setProperty('rate', 130)
-            _engine.setProperty('volume', 0.9)
-            if alert_type == "EAR":
-                _engine.say("Please stay alert. Drowsiness has been detected.")
-            else:
-                _engine.say("You appear to be fatigued. Please consider taking a rest.")
-            _engine.runAndWait()
-            _engine.stop()
-        except Exception as e:
-            print(f"[Audio] Alert failed: {e}")
-    threading.Thread(target=speak, daemon=True).start()
 
 def init_db():
     with db_lock:
@@ -484,6 +377,7 @@ def init_db():
             alert_type TEXT, ear_value REAL,
             mar_value REAL, duration_frames INTEGER,
             synced INTEGER DEFAULT 0)''')
+        c.execute("UPDATE sessions SET session_end=datetime('now') WHERE session_end IS NULL")
         conn.commit()
         conn.close()
 
@@ -512,18 +406,19 @@ def log_alert(session_id, alert_type, ear, mar, frames):
         conn.commit()
         conn.close()
 
-def end_session(session_id):
+def end_session(session_id, ear_samples):
     with db_lock:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         c = conn.cursor()
-        c.execute("SELECT COALESCE(AVG(ear_value), 0.0) FROM alerts WHERE session_id=?",
-                  (session_id,))
-        avg_ear = round(c.fetchone()[0], 4)
+        avg_ear = round(sum(ear_samples)/len(ear_samples), 4) if ear_samples else 0.0
         c.execute("UPDATE sessions SET session_end=?, avg_ear=? WHERE id=?",
                   (datetime.now().isoformat(), avg_ear, session_id))
         conn.commit()
         conn.close()
 
+# ════════════════════════════════════════════════════════════════════════
+#  BIOMETRICS
+# ════════════════════════════════════════════════════════════════════════
 def eye_aspect_ratio(eye):
     A = dist.euclidean(eye[1], eye[5])
     B = dist.euclidean(eye[2], eye[4])
@@ -536,17 +431,65 @@ def mouth_aspect_ratio(mouth):
     C = dist.euclidean(mouth[0], mouth[4])
     return (A + B) / (2.0 * C)
 
+# ════════════════════════════════════════════════════════════════════════
+#  CAMERA DETECTION
+# ════════════════════════════════════════════════════════════════════════
+def detect_cameras():
+    print("Scanning for cameras...")
+    available = []
+    for i in range(10):
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                name = f"Camera {i} (Built-in)" if i == 0 else f"Camera {i}"
+                available.append((i, name))
+                print(f"  [{i}] {name}")
+            cap.release()
+    return available
 
-# ── Load Models ───────────────────────────────────────────────────────────
+def select_camera(available):
+    if not available:
+        return 0
+    if len(available) == 1:
+        return available[0][0]
+    print("\nSelect camera (auto in 5s):")
+    for idx, (ci, name) in enumerate(available):
+        print(f"  {idx+1}. {name}")
+    import msvcrt, time as _t
+    deadline = _t.time() + 5
+    s = ""
+    while _t.time() < deadline:
+        if msvcrt.kbhit():
+            ch = msvcrt.getwche()
+            if ch == '\r': break
+            s += ch
+    try:
+        c = int(s.strip()) - 1
+        if 0 <= c < len(available):
+            return available[c][0]
+    except Exception:
+        pass
+    return available[0][0]
+
+# ════════════════════════════════════════════════════════════════════════
+#  INIT
+# ════════════════════════════════════════════════════════════════════════
 print("Loading models...")
-face_cascade  = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-face_detector = dlib.get_frontal_face_detector()
-predictor     = dlib.shape_predictor(PREDICTOR_PATH)
+face_cascade    = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+profile_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_profileface.xml")
+predictor       = dlib.shape_predictor(PREDICTOR_PATH)
 print("Models loaded!")
 
 (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
 (rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
 (mStart, mEnd) = face_utils.FACIAL_LANDMARKS_IDXS["inner_mouth"]
+
+available_cameras = detect_cameras()
+cam_index         = select_camera(available_cameras)
+cam_name          = next((n for i, n in available_cameras if i == cam_index), f"Camera {cam_index}")
 
 init_db()
 session_id       = start_session()
@@ -559,166 +502,168 @@ mar_alert_logged = False
 status           = "OK"
 prev_time        = time.perf_counter()
 frame_count      = 0
+yawn_count       = 0
+yawn_in_progress = False
+ear_samples      = []
+ear_history      = []
+mar_history      = []
+fps_samples      = []
 
-# Weighted drowsiness scores
-drowsy_score     = 0.0   # accumulates based on how far EAR drops below threshold
-mar_score        = 0.0   # accumulates based on how far MAR rises above threshold
+print(f"{greeting}! Session {session_id} started. Camera: {cam_name}")
+print("Press Q/ESC to quit. Press C to switch camera.")
 
-# Yawn tracking
-yawn_count            = 0      # how many complete yawns this session
-yawn_in_progress      = False  # True while mouth is currently open (yawning)
-yawn_last_time        = 0.0    # timestamp of last completed yawn (for reset timer)
-
-# Signal histories for waveform
-ear_history = []
-mar_history = []
-
-print(f"{greeting}! Session {session_id} started.")
-print("Starting webcam... Press Q or ESC to quit.")
-
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(WINDOW_NAME, 900, 660)
 
-while True:
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        break
-
-    frame_count += 1
-
-    # FPS
-    now       = time.perf_counter()
-    fps       = int(1 / max(now - prev_time, 1e-6))
-    prev_time = now
-
-    frame    = cv2.resize(frame, (900, 660))
-    gray_raw = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    gray     = np.array(gray_raw, dtype=np.uint8)
-
-    # ── Face Detection ──────────────────────────────────────────────────
-    haar_faces = face_cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
-    if len(haar_faces) == 0:
-        faces = list(face_detector(gray, 0))
-    else:
-        faces = [dlib.rectangle(int(x), int(y), int(x+w), int(y+h)) for (x, y, w, h) in haar_faces]
-
-    ear    = 0.0
-    mar    = 0.0
-    status = "OK"
-
-    if len(faces) == 0:
-        draw_no_face(frame, 900, 660)
-
-    for dlib_rect in faces:
-        try:
-            shape = predictor(gray, dlib_rect)
-            shape = face_utils.shape_to_np(shape)
-        except Exception:
+# ════════════════════════════════════════════════════════════════════════
+#  MAIN LOOP
+# ════════════════════════════════════════════════════════════════════════
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            time.sleep(0.05)
             continue
 
-        leftEye  = shape[lStart:lEnd]
-        rightEye = shape[rStart:rEnd]
-        mouth    = shape[mStart:mEnd]
+        frame_count += 1
+        now          = time.perf_counter()
+        fps          = int(1 / max(now - prev_time, 1e-6))
+        prev_time    = now
+        if fps < 500:
+            fps_samples.append(fps)
 
-        ear = (eye_aspect_ratio(leftEye) + eye_aspect_ratio(rightEye)) / 2.0
-        mar = mouth_aspect_ratio(mouth)
+        frame = cv2.resize(frame, (900, 660))
+        gray  = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
-        # Draw new-style landmarks
-        draw_landmarks(frame, shape, status)
+        # Face detection: frontal first, profile fallback
+        haar_faces = face_cascade.detectMultiScale(
+            gray, scaleFactor=1.1, minNeighbors=4, minSize=(60, 60),
+            flags=cv2.CASCADE_SCALE_IMAGE)
+        
+        if len(haar_faces) == 0:
+            profile_faces = profile_cascade.detectMultiScale(
+                gray, scaleFactor=1.1, minNeighbors=8, minSize=(80, 80))
+            if len(profile_faces) > 0:
+                haar_faces = profile_faces
+            else:
+                flipped = cv2.flip(gray, 1)
+                flipped_faces = profile_cascade.detectMultiScale(
+                    flipped, scaleFactor=1.1, minNeighbors=8, minSize=(80, 80))
+                if len(flipped_faces) > 0:
+                    fw = gray.shape[1]
+                    haar_faces = np.array([[fw - x - w, y, w, h]
+                                           for (x, y, w, h) in flipped_faces])
 
-        # Face bracket box
-        bx  = dlib_rect.left()
-        by_ = dlib_rect.top()
-        bw  = dlib_rect.width()
-        bh_ = dlib_rect.height()
-        face_col = C_RED if status != "OK" else C_ACCENT
-        draw_face_bracket(frame, bx, by_, bw, bh_, face_col, pulse=(status != "OK"))
+        faces = [dlib.rectangle(int(x), int(y), int(x+fw), int(y+fh))
+                 for (x, y, fw, fh) in haar_faces] if len(haar_faces) > 0 else []
 
-        # ── EAR check (weighted score) ──────────────────────────────────
-        # Score rises faster the more closed the eyes are.
-        # Normal blink (EAR ~0.22, 3-4 frames): score barely reaches ~0.4 — no alert
-        # Tired eyes (EAR ~0.18, 8 frames):     score reaches ~2.8   — alert in ~0.5s
-        # Fully closed (EAR ~0.05, 4 frames):   score reaches ~3.2   — alert in ~0.3s
-        if ear < EAR_THRESHOLD:
-            ear_counter  += 1
-            deficit       = EAR_THRESHOLD - ear          # how far below threshold
-            drowsy_score += deficit * 10                 # weight by severity
-            if drowsy_score >= DROWSY_SCORE_THRESHOLD:
-                status = "EAR"
-                if not ear_alert_logged:
-                    log_alert(session_id, "EAR", ear, mar, ear_counter)
-                    total_alerts     += 1
-                    ear_alert_logged  = True
-                    play_alert_sound("EAR")
-        else:
-            ear_counter   = 0
-            ear_alert_logged = False
-            # Decay score gradually — eyes briefly open shouldn't reset everything
-            drowsy_score  = max(0.0, drowsy_score - DROWSY_SCORE_DECAY)
+        ear    = 0.0
+        mar    = 0.0
+        status = "OK"
 
-        # ── MAR check (yawn counter) ────────────────────────────────────
-        # We only alert on the 3rd yawn. A yawn is counted once the mouth
-        # fully CLOSES again after being open — not while it's still open.
-        # Yawn count resets automatically after YAWN_RESET_SECONDS of no yawning.
-        if mar > MAR_THRESHOLD:
-            mar_counter  += 1
-            surplus       = mar - MAR_THRESHOLD
-            mar_score    += surplus * 8
+        if len(faces) == 0:
+            h_f, w_f = gray.shape
+            cr = gray[h_f//4:3*h_f//4, w_f//4:3*w_f//4]
+            msg = ("Adjust position — face the camera directly"
+                   if np.mean(cr) > 40
+                   else "No face detected — move in front of camera")
+            tw = text_size(msg, 0.55)[0]
+            put_text(frame, msg, ((900-tw)//2, 350), 0.55, C_AMBER)
 
-            # Mark that a yawn event is currently in progress
-            if mar_score >= MAR_SCORE_THRESHOLD and not yawn_in_progress:
-                yawn_in_progress = True
+        for dlib_rect in faces:
+            try:
+                shape = predictor(gray, dlib_rect)
+                shape = face_utils.shape_to_np(shape)
+            except Exception as e:
+                print(f"[Landmark] {e}")
+                continue
 
-        else:
-            # Mouth just closed — if a yawn was in progress, it just completed
-            if yawn_in_progress:
-                yawn_in_progress  = False
-                yawn_count       += 1
-                yawn_last_time    = time.perf_counter()
-                print(f"[Yawn] Yawn #{yawn_count} detected")
+            leftEye  = shape[lStart:lEnd]
+            rightEye = shape[rStart:rEnd]
+            mouth    = shape[mStart:mEnd]
 
-                # Alert only on the Nth yawn
-                if yawn_count >= YAWNS_BEFORE_ALERT:
-                    if status == "OK":
-                        status = "MAR"
-                    if not mar_alert_logged:
-                        log_alert(session_id, "MAR", ear, mar, mar_counter)
+            ear = (eye_aspect_ratio(leftEye) + eye_aspect_ratio(rightEye)) / 2.0
+            mar = mouth_aspect_ratio(mouth)
+            ear_samples.append(round(float(ear), 4))
+
+            draw_landmarks(frame, shape, status)
+            draw_face_bracket(frame, dlib_rect.left(), dlib_rect.top(),
+                              dlib_rect.width(), dlib_rect.height(),
+                              C_RED if status != "OK" else C_ACCENT,
+                              pulse=(status != "OK"))
+
+            # ── EAR drowsiness check ──────────────────────────────────
+            if ear < EAR_THRESHOLD:
+                ear_counter += 1
+                if ear_counter >= EAR_CONSEC_FRAMES:
+                    status = "EAR"
+                    if not ear_alert_logged:
+                        log_alert(session_id, "EAR", ear, mar, ear_counter)
                         total_alerts    += 1
-                        mar_alert_logged = True
+                        ear_alert_logged = True
+                        play_alert_sound("EAR")
+            else:
+                ear_counter      = 0
+                ear_alert_logged = False
+
+            # ── MAR yawn cycle counting ───────────────────────────────
+            if mar > MAR_THRESHOLD:
+                mar_counter += 1
+                if mar_counter >= MAR_CONSEC_FRAMES and not yawn_in_progress:
+                    yawn_in_progress = True
+            else:
+                if yawn_in_progress:
+                    yawn_in_progress = False
+                    yawn_count += 1
+                    print(f"[Yawn] #{yawn_count} detected")
+                    if yawn_count >= YAWNS_BEFORE_ALERT:
+                        status = "MAR"
+                        log_alert(session_id, "MAR", ear, mar, mar_counter)
+                        total_alerts += 1
                         play_alert_sound("MAR")
-                        # Reset yawn count after alert so cycle can repeat
                         yawn_count = 0
+                        print("[Alert] MAR alert fired!")
+                mar_counter = 0
 
-            mar_counter      = 0
-            mar_alert_logged = False
-            mar_score        = max(0.0, mar_score - MAR_SCORE_DECAY)
+        # ── Render ───────────────────────────────────────────────────
+        draw_top_bar(frame, 900, session_id, fps, greeting, cam_name, frame_count)
+        draw_alert_banner(frame, 900, status, frame_count)
+        draw_bottom_hud(frame, 660, 900, ear, mar,
+                        ear_counter, mar_counter,
+                        total_alerts, status, frame_count,
+                        ear_history, mar_history, yawn_count)
+        draw_corner_reticles(frame, 900, 660)
+        draw_scanlines(frame, 660, 900)
 
-        # Reset yawn count if driver hasn't yawned in YAWN_RESET_SECONDS
-        if yawn_count > 0 and (time.perf_counter() - yawn_last_time) > YAWN_RESET_SECONDS:
-            print(f"[Yawn] Count reset after {YAWN_RESET_SECONDS}s inactivity")
-            yawn_count = 0
+        cv2.imshow(WINDOW_NAME, frame)
 
-    # ── Draw all HUD layers ─────────────────────────────────────────────
-    draw_top_bar(frame, 900, session_id, fps, greeting, frame_count)
-    draw_alert_banner(frame, 900, status, frame_count)
-    draw_bottom_hud(frame, 660, 900, ear, mar,
-                    ear_counter, mar_counter,
-                    total_alerts, status, frame_count,
-                    ear_history, mar_history,
-                    drowsy_score, mar_score,
-                    yawn_count)
-    draw_corner_reticles(frame, 900, 660)
-    draw_scanlines(frame, 660, 900)
+        key = cv2.waitKey(1) & 0xFF
 
-    cv2.imshow(WINDOW_NAME, frame)
+        if key == ord('c') or key == ord('C'):
+            cap.release()
+            current = [i for i, n in available_cameras]
+            if cam_index in current:
+                pos = current.index(cam_index)
+                cam_index = current[(pos + 1) % len(current)]
+            else:
+                cam_index = current[0]
+            cam_name = next((n for i, n in available_cameras if i == cam_index), f"Camera {cam_index}")
+            cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+            ear_counter = mar_counter = 0
+            ear_alert_logged = mar_alert_logged = False
+            print(f"[Camera] Switched to: {cam_name}")
 
-    if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
-        break
-    if cv2.waitKey(1) & 0xFF in [ord('q'), 27]:
-        break
+        if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
+            break
+        if key in [ord('q'), 27]:
+            break
 
-cap.release()
-cv2.destroyAllWindows()
-end_session(session_id)
-print(f"Session {session_id} ended. Total alerts: {total_alerts}")
+finally:
+    cap.release()
+    cv2.destroyAllWindows()
+    end_session(session_id, ear_samples)
+    print(f"Session {session_id} ended. Total alerts: {total_alerts}")
+    if fps_samples:
+        avg = round(sum(fps_samples)/len(fps_samples), 2)
+        print(f"Avg FPS: {avg} ({'PASS' if avg >= 15 else 'FAIL'})")
