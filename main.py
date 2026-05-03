@@ -30,6 +30,14 @@ DROWSY_SCORE_DECAY     = 0.3   # score drops this much every frame eyes are open
 MAR_SCORE_THRESHOLD    = 2.0   # same idea for yawning
 MAR_SCORE_DECAY        = 0.2
 
+# ── Yawn Counter ─────────────────────────────────────────────────────────
+# 1-2 yawns are normal — completely ignored.
+# Only on the 3rd yawn does the system alert the driver.
+# A yawn is counted only when a full MAR event COMPLETES
+# (mouth opens fully then closes again) — not while mouth is open.
+YAWNS_BEFORE_ALERT  = 3     # alert fires on this yawn number
+YAWN_RESET_SECONDS  = 300   # yawn count resets after 5 mins of no yawning
+
 # ── Luxury Dark Palette (BGR) ────────────────────────────────────────────
 C_BG          = (8, 10, 14)          # near-black base
 C_PANEL       = (18, 22, 30)         # card background
@@ -268,7 +276,8 @@ def draw_top_bar(img, w, session_id, fps, greeting, frame_count):
 def draw_bottom_hud(img, h, w, ear, mar, ear_counter, mar_counter,
                     total_alerts, status, frame_count,
                     ear_history, mar_history,
-                    drowsy_score=0.0, mar_score=0.0):
+                    drowsy_score=0.0, mar_score=0.0,
+                    yawn_count=0):
     bh  = 130    # bottom panel height
     by  = h - bh
     filled_rect(img, (0, by), (w, h), C_BG, 0.96)
@@ -326,13 +335,12 @@ def draw_bottom_hud(img, h, w, ear, mar, ear_counter, mar_counter,
     draw_stat_card(img, 520, by + 8, 115, 55, "TOTAL ALERTS",
                    str(total_alerts), accent=alert_color, alert=(total_alerts > 0))
 
-    # Show drowsy score as a 0-100% bar so it's human readable
-    score_pct = min(drowsy_score / DROWSY_SCORE_THRESHOLD, 1.0)
-    score_col = C_RED if score_pct > 0.7 else (C_AMBER if score_pct > 0.3 else C_MUTED)
-    draw_stat_card(img, 520, by + 68, 115, 55, "DROWSY SCORE",
-                   f"{min(int(score_pct * 100), 100)}%",
-                   bar_pct=score_pct,
-                   accent=score_col)
+    # Yawn counter card — shows e.g. "2 / 3" building toward alert
+    yawn_col = C_GREEN if yawn_count == 0 else (C_AMBER if yawn_count < YAWNS_BEFORE_ALERT else C_VIOLET)
+    draw_stat_card(img, 520, by + 68, 115, 55, "YAWNS",
+                   f"{yawn_count} / {YAWNS_BEFORE_ALERT}",
+                   bar_pct=yawn_count / YAWNS_BEFORE_ALERT,
+                   accent=yawn_col)
 
     # ── Driver status ────────────────────────────────────────────────────
     cv2.line(img, (648, by + 15), (648, h - 15), C_BORDER, 1, cv2.LINE_AA)
@@ -556,6 +564,11 @@ frame_count      = 0
 drowsy_score     = 0.0   # accumulates based on how far EAR drops below threshold
 mar_score        = 0.0   # accumulates based on how far MAR rises above threshold
 
+# Yawn tracking
+yawn_count            = 0      # how many complete yawns this session
+yawn_in_progress      = False  # True while mouth is currently open (yawning)
+yawn_last_time        = 0.0    # timestamp of last completed yawn (for reset timer)
+
 # Signal histories for waveform
 ear_history = []
 mar_history = []
@@ -644,22 +657,47 @@ while True:
             # Decay score gradually — eyes briefly open shouldn't reset everything
             drowsy_score  = max(0.0, drowsy_score - DROWSY_SCORE_DECAY)
 
-        # ── MAR check (weighted score) ──────────────────────────────────
+        # ── MAR check (yawn counter) ────────────────────────────────────
+        # We only alert on the 3rd yawn. A yawn is counted once the mouth
+        # fully CLOSES again after being open — not while it's still open.
+        # Yawn count resets automatically after YAWN_RESET_SECONDS of no yawning.
         if mar > MAR_THRESHOLD:
-            mar_counter += 1
-            surplus      = mar - MAR_THRESHOLD           # how far above threshold
-            mar_score   += surplus * 8
-            if mar_score >= MAR_SCORE_THRESHOLD:
-                if status == "OK": status = "MAR"
-                if not mar_alert_logged:
-                    log_alert(session_id, "MAR", ear, mar, mar_counter)
-                    total_alerts    += 1
-                    mar_alert_logged = True
-                    play_alert_sound("MAR")
+            mar_counter  += 1
+            surplus       = mar - MAR_THRESHOLD
+            mar_score    += surplus * 8
+
+            # Mark that a yawn event is currently in progress
+            if mar_score >= MAR_SCORE_THRESHOLD and not yawn_in_progress:
+                yawn_in_progress = True
+
         else:
+            # Mouth just closed — if a yawn was in progress, it just completed
+            if yawn_in_progress:
+                yawn_in_progress  = False
+                yawn_count       += 1
+                yawn_last_time    = time.perf_counter()
+                print(f"[Yawn] Yawn #{yawn_count} detected")
+
+                # Alert only on the Nth yawn
+                if yawn_count >= YAWNS_BEFORE_ALERT:
+                    if status == "OK":
+                        status = "MAR"
+                    if not mar_alert_logged:
+                        log_alert(session_id, "MAR", ear, mar, mar_counter)
+                        total_alerts    += 1
+                        mar_alert_logged = True
+                        play_alert_sound("MAR")
+                        # Reset yawn count after alert so cycle can repeat
+                        yawn_count = 0
+
             mar_counter      = 0
             mar_alert_logged = False
             mar_score        = max(0.0, mar_score - MAR_SCORE_DECAY)
+
+        # Reset yawn count if driver hasn't yawned in YAWN_RESET_SECONDS
+        if yawn_count > 0 and (time.perf_counter() - yawn_last_time) > YAWN_RESET_SECONDS:
+            print(f"[Yawn] Count reset after {YAWN_RESET_SECONDS}s inactivity")
+            yawn_count = 0
 
     # ── Draw all HUD layers ─────────────────────────────────────────────
     draw_top_bar(frame, 900, session_id, fps, greeting, frame_count)
@@ -668,7 +706,8 @@ while True:
                     ear_counter, mar_counter,
                     total_alerts, status, frame_count,
                     ear_history, mar_history,
-                    drowsy_score, mar_score)
+                    drowsy_score, mar_score,
+                    yawn_count)
     draw_corner_reticles(frame, 900, 660)
     draw_scanlines(frame, 660, 900)
 
