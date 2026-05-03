@@ -61,3 +61,47 @@ Max FPS    : 22
 Requirement: >=15 FPS
 Result     : PASS
 ================================================
+
+=== FPS Performance Report - Session 9 ===
+Date       : 2026-05-03 19:53:11
+Camera     : Camera 0 (Built-in)
+Frames     : 1124
+Average FPS: 14.73
+Min FPS    : 0
+Max FPS    : 25
+Requirement: >=15 FPS
+Result     : FAIL
+================================================
+
+=== FPS Performance Report - Session 10 ===
+Date       : 2026-05-03 19:56:21
+Camera     : Camera 0 (Built-in)
+Frames     : 969
+Average FPS: 17.53
+Min FPS    : 0
+Max FPS    : 22
+Requirement: >=15 FPS
+Result     : PASS
+================================================
+
+=== FPS Performance Report - Session 11 ===
+Date       : 2026-05-03 19:58:33
+Camera     : Camera 0 (Built-in)
+Frames     : 218
+Average FPS: 17.56
+Min FPS    : 0
+Max FPS    : 22
+Requirement: >=15 FPS
+Result     : PASS
+================================================
+
+=== FPS Performance Report - Session 12 ===
+Date       : 2026-05-03 19:59:17
+Camera     : Camera 0 (Built-in)
+Frames     : 438
+Average FPS: 18.26
+Min FPS    : 0
+Max FPS    : 22
+Requirement: >=15 FPS
+Result     : PASS
+================================================

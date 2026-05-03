@@ -69,3 +69,75 @@ Note            : Latency = frames_required x frame_duration.
                   Reduce EAR_CONSEC_FRAMES for faster alerts
                   (tradeoff: more false positives).
 ================================================
+
+=== Alert Latency Report - Session 9 ===
+Date            : 2026-05-03 19:53:11
+Camera          : Camera 0 (Built-in)
+Total alerts    : 4
+MAR alerts      : 4
+MAR avg latency : 733.2ms
+MAR min latency : 702.3ms
+MAR max latency : 750.2ms
+Overall avg     : 733.2ms
+Requirement     : <100ms (Could)
+Note            : Latency = frames_required x frame_duration.
+                  At 15fps, 20 EAR frames = ~1333ms by design.
+                  Reduce EAR_CONSEC_FRAMES for faster alerts
+                  (tradeoff: more false positives).
+================================================
+
+=== Alert Latency Report - Session 10 ===
+Date            : 2026-05-03 19:56:21
+Camera          : Camera 0 (Built-in)
+Total alerts    : 5
+EAR alerts      : 5
+EAR avg latency : 1091.6ms
+EAR min latency : 958.7ms
+EAR max latency : 1262.6ms
+Overall avg     : 1091.6ms
+Requirement     : <100ms (Could)
+Note            : Latency = frames_required x frame_duration.
+                  At 15fps, 20 EAR frames = ~1333ms by design.
+                  Reduce EAR_CONSEC_FRAMES for faster alerts
+                  (tradeoff: more false positives).
+================================================
+
+=== Alert Latency Report - Session 11 ===
+Date            : 2026-05-03 19:58:33
+Camera          : Camera 0 (Built-in)
+Total alerts    : 2
+EAR alerts      : 1
+EAR avg latency : 1303.5ms
+EAR min latency : 1303.5ms
+EAR max latency : 1303.5ms
+MAR alerts      : 1
+MAR avg latency : 348.5ms
+MAR min latency : 348.5ms
+MAR max latency : 348.5ms
+Overall avg     : 826.0ms
+Requirement     : <100ms (Could)
+Note            : Latency = frames_required x frame_duration.
+                  At 15fps, 20 EAR frames = ~1333ms by design.
+                  Reduce EAR_CONSEC_FRAMES for faster alerts
+                  (tradeoff: more false positives).
+================================================
+
+=== Alert Latency Report - Session 12 ===
+Date            : 2026-05-03 19:59:17
+Camera          : Camera 0 (Built-in)
+Total alerts    : 2
+EAR alerts      : 1
+EAR avg latency : 948.2ms
+EAR min latency : 948.2ms
+EAR max latency : 948.2ms
+MAR alerts      : 1
+MAR avg latency : 346.5ms
+MAR min latency : 346.5ms
+MAR max latency : 346.5ms
+Overall avg     : 647.3ms
+Requirement     : <100ms (Could)
+Note            : Latency = frames_required x frame_duration.
+                  At 15fps, 20 EAR frames = ~1333ms by design.
+                  Reduce EAR_CONSEC_FRAMES for faster alerts
+                  (tradeoff: more false positives).
+================================================
