@@ -3,7 +3,7 @@ import dlib
 import numpy as np
 import sqlite3
 import threading
-import pyttsx3
+#import pyttsx3
 import time  
 from datetime import datetime
 from scipy.spatial import distance as dist
@@ -13,7 +13,7 @@ db_lock = threading.Lock()
 
 # ── Constants ───────────────────────────────────────────────────────────
 EAR_THRESHOLD     = 0.25
-MAR_THRESHOLD     = 0.6
+MAR_THRESHOLD     = 0.45
 EAR_CONSEC_FRAMES = 20
 MAR_CONSEC_FRAMES = 15
 PREDICTOR_PATH    = "shape_predictor_68_face_landmarks.dat"
@@ -41,14 +41,12 @@ def play_alert_sound(alert_type="EAR"):
     def speak():
         try:
             _engine = pyttsx3.init()
-            voices = _engine.getProperty('voices')
-            _engine.setProperty('voice', voices[1].id)  # Zira — female voice
-            _engine.setProperty('rate', 130)             # slower = softer, classier
-            _engine.setProperty('volume', 0.9)
+            _engine.setProperty('rate', 150)
+            _engine.setProperty('volume', 1.0)
             if alert_type == "EAR":
-                _engine.say("Please stay alert. Drowsiness has been detected.")
+                _engine.say("Drowsiness detected! Please take a break.")
             else:
-                _engine.say("You appear to be fatigued. Please consider taking a rest.")
+                _engine.say("Yawning detected. You seem tired. Please rest.")
             _engine.runAndWait()
             _engine.stop()
         except Exception as e:
@@ -269,9 +267,11 @@ def select_camera(available):
 
 # ── Load Models ──────────────────────────────────────────────────────────
 print("Loading models...")
-face_cascade = cv2.CascadeClassifier(
+face_cascade    = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-predictor    = dlib.shape_predictor(PREDICTOR_PATH)
+profile_cascade = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_profileface.xml")
+predictor       = dlib.shape_predictor(PREDICTOR_PATH)
 print("Models loaded!")
 
 (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
@@ -324,20 +324,44 @@ while True:
     gray  = np.ascontiguousarray(
         cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), dtype=np.uint8)
 
+    # Primary: frontal face
     faces = face_cascade.detectMultiScale(
         gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50),
         flags=cv2.CASCADE_SCALE_IMAGE)
+
+    # Fallback: profile cascade for tilted/side faces
+    if len(faces) == 0:
+        profile_faces = profile_cascade.detectMultiScale(
+            gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
+        if len(profile_faces) > 0:
+            faces = profile_faces
+        # Also try flipped for other side profile
+        if len(faces) == 0:
+            flipped = cv2.flip(gray, 1)
+            flipped_faces = profile_cascade.detectMultiScale(
+                flipped, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50))
+            if len(flipped_faces) > 0:
+                fw = gray.shape[1]
+                faces = np.array([[fw - x - w, y, w, h]
+                                  for (x, y, w, h) in flipped_faces])
 
     ear    = 0.0
     mar    = 0.0
     status = "OK"
 
     if len(faces) == 0:
-        tw = cv2.getTextSize("No face detected — please face the camera",
-                             cv2.FONT_HERSHEY_SIMPLEX, 0.65, 1)[0][0]
-        cv2.putText(frame, "No face detected — please face the camera",
-                    ((900-tw)//2, 350),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, C_ORANGE, 1, cv2.LINE_AA)
+        # Check if there is something face-like in frame (skin tone region)
+        # Use a simple heuristic — if image has significant content near center
+        h_f, w_f = gray.shape
+        center_region = gray[h_f//4:3*h_f//4, w_f//4:3*w_f//4]
+        mean_brightness = np.mean(center_region)
+        if mean_brightness > 40:
+            msg = "Adjust your position — please face the camera directly"
+        else:
+            msg = "No face detected — please move in front of the camera"
+        tw = cv2.getTextSize(msg, cv2.FONT_HERSHEY_SIMPLEX, 0.6, 1)[0][0]
+        cv2.putText(frame, msg, ((900-tw)//2, 350),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, C_ORANGE, 1, cv2.LINE_AA)
 
     for (x, y, w, h) in faces:
         dlib_rect = dlib.rectangle(int(x), int(y), int(x+w), int(y+h))
