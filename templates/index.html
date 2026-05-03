@@ -28,7 +28,7 @@
     .green { color: #4ade80; }
     .section { background: #1e293b; border-radius: 12px; padding: 24px; border: 1px solid #334155; margin-bottom: 24px; }
     .section h2 { font-size: 15px; color: #94a3b8; margin-bottom: 16px; font-weight: 500; }
-    .filter-bar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; }
+    .filter-bar { display: flex; gap: 10px; margin-bottom: 16px; flex-wrap: wrap; align-items: center; }
     .filter-btn { background: #0f172a; border: 1px solid #334155; color: #94a3b8; padding: 6px 14px; border-radius: 6px; cursor: pointer; font-size: 12px; }
     .filter-btn.active { background: #22d3ee22; border-color: #22d3ee; color: #22d3ee; }
     table { width: 100%; border-collapse: collapse; font-size: 13px; }
@@ -49,6 +49,18 @@
     .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; }
     .insight-box { background: #162032; border-radius: 8px; padding: 14px 16px; margin-top: 12px; border-left: 3px solid #22d3ee; font-size: 13px; color: #94a3b8; }
     .insight-box span { color: #22d3ee; font-weight: 500; }
+
+    /* ── Toolbar ── */
+    .toolbar { display: flex; align-items: center; gap: 12px; margin-bottom: 24px; flex-wrap: wrap; }
+    .date-input { background: #1e293b; border: 1px solid #334155; color: #cbd5e1; padding: 7px 12px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+    .date-input:focus { outline: none; border-color: #22d3ee; }
+    .btn-filter { background: #22d3ee22; border: 1px solid #22d3ee; color: #22d3ee; padding: 7px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+    .btn-filter:hover { background: #22d3ee44; }
+    .btn-clear { background: transparent; border: 1px solid #334155; color: #64748b; padding: 7px 14px; border-radius: 8px; font-size: 13px; cursor: pointer; text-decoration: none; }
+    .btn-clear:hover { border-color: #64748b; color: #94a3b8; }
+    .btn-archive { background: transparent; border: 1px solid #f87171; color: #f87171; padding: 7px 16px; border-radius: 8px; font-size: 13px; cursor: pointer; }
+    .btn-archive:hover { background: #f8717122; }
+    .date-badge { background: #22d3ee22; border: 1px solid #22d3ee; color: #22d3ee; padding: 4px 10px; border-radius: 6px; font-size: 12px; }
   </style>
 </head>
 <body>
@@ -60,6 +72,29 @@
 </div>
 
 <div class="container">
+
+  <!-- ── Toolbar: date filter + archive ── -->
+  <div class="toolbar">
+    <form method="GET" action="/" style="display:flex; gap:10px; align-items:center; flex-wrap:wrap;">
+      <input
+        type="date"
+        name="date"
+        class="date-input"
+        value="{{ selected_date }}"
+        title="Filter sessions by date"
+      >
+      <button type="submit" class="btn-filter">Filter</button>
+      {% if selected_date %}
+        <a href="/" class="btn-clear">Clear</a>
+        <span class="date-badge">Showing: {{ selected_date }}</span>
+      {% endif %}
+    </form>
+
+    <form method="POST" action="/archive" style="margin-left:auto;"
+          onsubmit="return confirm('Archive all current data and start fresh?\n\nYour data will be saved in the database archive tables — it is NOT deleted.');">
+      <button type="submit" class="btn-archive">&#8681; Archive &amp; Reset</button>
+    </form>
+  </div>
 
   <!-- Status Bar -->
   <div class="status-bar">
@@ -96,12 +131,12 @@
     <div class="stat-card">
       <div class="label">Total Sessions</div>
       <div class="value cyan">{{ total_sessions }}</div>
-      <div class="trend">All recorded sessions</div>
+      <div class="trend">{% if selected_date %}On {{ selected_date }}{% else %}All recorded sessions{% endif %}</div>
     </div>
     <div class="stat-card">
       <div class="label">Total Alerts</div>
       <div class="value red">{{ total_alerts }}</div>
-      <div class="trend">Across all sessions</div>
+      <div class="trend">{% if selected_date %}On {{ selected_date }}{% else %}Across all sessions{% endif %}</div>
     </div>
     <div class="stat-card">
       <div class="label">Eye Closure Alerts</div>
@@ -118,7 +153,7 @@
   <!-- Chart + Insight -->
   <div class="two-col">
     <div class="section">
-      <h2>Alerts Per Session</h2>
+      <h2>Alerts Per Session{% if selected_date %} — {{ selected_date }}{% endif %}</h2>
       <div class="chart-container">
         <canvas id="alertChart"></canvas>
       </div>
@@ -159,11 +194,11 @@
 
   <!-- Session History -->
   <div class="section">
-    <h2>Session History</h2>
+    <h2>Session History{% if selected_date %} — {{ selected_date }}{% endif %}</h2>
     <div class="filter-bar">
-      <button class="filter-btn active" onclick="filterSessions('all')">All</button>
-      <button class="filter-btn" onclick="filterSessions('alerts')">With Alerts</button>
-      <button class="filter-btn" onclick="filterSessions('clean')">Clean Sessions</button>
+      <button class="filter-btn active" onclick="filterSessions('all', event)">All</button>
+      <button class="filter-btn" onclick="filterSessions('alerts', event)">With Alerts</button>
+      <button class="filter-btn" onclick="filterSessions('clean', event)">Clean Sessions</button>
     </div>
     {% if sessions %}
     <table id="sessions-table">
@@ -173,6 +208,7 @@
           <th>Start Time</th>
           <th>End Time</th>
           <th>Duration</th>
+          <th>Avg EAR</th>
           <th>Alerts</th>
           <th>Risk</th>
           <th>Status</th>
@@ -185,6 +221,7 @@
           <td>{{ s['session_start'][:19] if s['session_start'] else '-' }}</td>
           <td>{{ s['session_end'][:19] if s['session_end'] else 'Active' }}</td>
           <td>{{ s['duration']|int if s['duration'] else '-' }}s</td>
+          <td>{{ "%.4f"|format(s['avg_ear']) if s['avg_ear'] else '-' }}</td>
           <td><span class="red">{{ s['total_alerts'] }}</span></td>
           <td>
             {% if s['total_alerts'] == 0 %}<span class="badge badge-low">LOW</span>
@@ -200,17 +237,17 @@
       </tbody>
     </table>
     {% else %}
-    <div class="no-data">No sessions recorded yet. Run main.py to start detecting!</div>
+    <div class="no-data">No sessions found{% if selected_date %} for {{ selected_date }}{% endif %}. {% if not selected_date %}Run main.py to start detecting!{% endif %}</div>
     {% endif %}
   </div>
 
   <!-- Recent Alerts -->
   <div class="section">
-    <h2>Recent Alerts (last 50)</h2>
+    <h2>Recent Alerts (last 50){% if selected_date %} — {{ selected_date }}{% endif %}</h2>
     <div class="filter-bar">
-      <button class="filter-btn active" onclick="filterAlerts('all')">All</button>
-      <button class="filter-btn" onclick="filterAlerts('EAR')">EAR Only</button>
-      <button class="filter-btn" onclick="filterAlerts('MAR')">MAR Only</button>
+      <button class="filter-btn active" onclick="filterAlerts('all', event)">All</button>
+      <button class="filter-btn" onclick="filterAlerts('EAR', event)">EAR Only</button>
+      <button class="filter-btn" onclick="filterAlerts('MAR', event)">MAR Only</button>
     </div>
     {% if alerts %}
     <table id="alerts-table">
@@ -245,7 +282,7 @@
       </tbody>
     </table>
     {% else %}
-    <div class="no-data">No alerts recorded yet.</div>
+    <div class="no-data">No alerts found{% if selected_date %} for {{ selected_date }}{% endif %}.</div>
     {% endif %}
   </div>
 
@@ -259,7 +296,6 @@
   setInterval(updateClock, 1000);
   setTimeout(() => location.reload(), 30000);
 
-  // Chart
   const ctx = document.getElementById('alertChart').getContext('2d');
   new Chart(ctx, {
     type: 'bar',
@@ -285,9 +321,8 @@
     }
   });
 
-  // Filter sessions
-  function filterSessions(type) {
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  function filterSessions(type, event) {
+    event.target.closest('.filter-bar').querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     event.target.classList.add('active');
     document.querySelectorAll('#sessions-table tbody tr').forEach(row => {
       const alerts = parseInt(row.dataset.alerts);
@@ -297,9 +332,8 @@
     });
   }
 
-  // Filter alerts
-  function filterAlerts(type) {
-    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  function filterAlerts(type, event) {
+    event.target.closest('.filter-bar').querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
     event.target.classList.add('active');
     document.querySelectorAll('#alerts-table tbody tr').forEach(row => {
       if (type === 'all') row.style.display = '';
