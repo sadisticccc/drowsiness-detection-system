@@ -3,8 +3,8 @@ import dlib
 import numpy as np
 import sqlite3
 import threading
-import pyttsx3
-import time
+#import pyttsx3
+import time  
 from datetime import datetime
 from scipy.spatial import distance as dist
 from imutils import face_utils
@@ -32,44 +32,25 @@ C_PANEL   = (30, 35, 45)
 
 def get_greeting():
     hour = datetime.now().hour
-    if 5 <= hour < 12:    return "Good Morning"
+    if 5 <= hour < 12:   return "Good Morning"
     elif 12 <= hour < 17: return "Good Afternoon"
     elif 17 <= hour < 21: return "Good Evening"
     else:                 return "Good Night"
 
-_tts_lock = threading.Lock()
-
 def play_alert_sound(alert_type="EAR"):
     def speak():
-        msg = ("Drowsiness detected! Please take a break."
-               if alert_type == "EAR"
-               else "Yawning detected. You seem tired. Please rest.")
-        # ── Try pyttsx3 (text-to-speech, works offline) ─────────────────
-        with _tts_lock:
-            try:
-                _engine = pyttsx3.init()
-                _engine.setProperty('rate', 145)
-                _engine.setProperty('volume', 1.0)
-                # Pick a clear voice if available
-                voices = _engine.getProperty('voices')
-                if voices:
-                    _engine.setProperty('voice', voices[0].id)
-                _engine.say(msg)
-                _engine.runAndWait()
-                _engine.stop()
-                return
-            except Exception as e:
-                print(f"[Audio] pyttsx3 failed: {e}")
-        # ── Fallback: system beep via winsound (Windows only) ────────────
         try:
-            import winsound
-            freq = 1000 if alert_type == "EAR" else 800
-            winsound.Beep(freq, 800)
-            return
-        except Exception:
-            pass
-        # ── Fallback: print a visible terminal alert ──────────────────────
-        print(f"\a[ALERT] {msg}")   # \a rings the terminal bell
+            _engine = pyttsx3.init()
+            _engine.setProperty('rate', 150)
+            _engine.setProperty('volume', 1.0)
+            if alert_type == "EAR":
+                _engine.say("Drowsiness detected! Please take a break.")
+            else:
+                _engine.say("Yawning detected. You seem tired. Please rest.")
+            _engine.runAndWait()
+            _engine.stop()
+        except Exception as e:
+            print(f"[Audio] Alert failed: {e}")
     threading.Thread(target=speak, daemon=True).start()
 
 def init_db():
@@ -87,6 +68,11 @@ def init_db():
             alert_type TEXT, ear_value REAL,
             mar_value REAL, duration_frames INTEGER,
             synced INTEGER DEFAULT 0)''')
+        # Close any sessions left open by a previous crash
+        c.execute("""
+            UPDATE sessions SET session_end = datetime('now')
+            WHERE session_end IS NULL
+        """)
         conn.commit()
         conn.close()
 
@@ -115,15 +101,24 @@ def log_alert(session_id, alert_type, ear, mar, frames):
         conn.commit()
         conn.close()
 
-def end_session(session_id):
+def end_session(session_id, ear_samples):
+    """Close session. ear_samples is a list of EAR floats collected during the run."""
     with db_lock:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         c = conn.cursor()
-        c.execute("SELECT COALESCE(AVG(ear_value), 0.0) FROM alerts WHERE session_id=?",
-                  (session_id,))
-        avg_ear = round(c.fetchone()[0], 4)
-        c.execute("UPDATE sessions SET session_end=?, avg_ear=? WHERE id=?",
-                  (datetime.now().isoformat(), avg_ear, session_id))
+        # Use live EAR samples if available, otherwise fall back to alert rows
+        if ear_samples:
+            avg_ear = round(sum(ear_samples) / len(ear_samples), 4)
+        else:
+            c.execute("""
+                SELECT AVG(ear_value) FROM alerts
+                WHERE session_id = ? AND ear_value IS NOT NULL
+            """, (session_id,))
+            row     = c.fetchone()
+            avg_ear = round(row[0], 4) if row and row[0] is not None else 0.0
+        c.execute("""
+            UPDATE sessions SET session_end = ?, avg_ear = ? WHERE id = ?
+        """, (datetime.now().isoformat(), avg_ear, session_id))
         conn.commit()
         conn.close()
 
@@ -165,18 +160,28 @@ def draw_stat_pill(frame, x, y, label, value, val_color, bar_val=None):
 def draw_ui(frame, ear, mar, ear_counter, mar_counter,
             session_id, total_alerts, greeting, status, fps):
     h, w = frame.shape[:2]
+
+    # ── Top navbar ────────────────────────────────────────────────────────
     draw_rounded_rect(frame, (0, 0), (w, 58), C_DARK, 0.92, radius=0)
     cv2.line(frame, (0, 58), (w, 58), (50, 55, 65), 1)
+
+    # Logo dot
     cv2.circle(frame, (22, 29), 7, C_CYAN, -1)
     cv2.putText(frame, "DrowsGuard", (38, 37),
                 cv2.FONT_HERSHEY_DUPLEX, 0.75, C_CYAN, 1, cv2.LINE_AA)
-    now_str    = datetime.now().strftime("%H:%M:%S")
+
+    # Center greeting + time
+    now_str = datetime.now().strftime("%H:%M:%S")
     greet_text = f"{greeting}  |  {now_str}"
     tw = cv2.getTextSize(greet_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0][0]
     cv2.putText(frame, greet_text, ((w - tw)//2, 36),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.48, C_WHITE, 1, cv2.LINE_AA)
+
+    # Right — session + FPS
     cv2.putText(frame, f"Session #{session_id}   {fps} FPS", (w-200, 36),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, C_GRAY, 1, cv2.LINE_AA)
+
+    # ── Alert banner ──────────────────────────────────────────────────────
     if status == "EAR":
         draw_rounded_rect(frame, (0, 62), (w, 108), (0, 0, 180), 0.92, radius=0)
         cv2.line(frame, (0, 108), (w, 108), (0, 0, 220), 1)
@@ -191,21 +196,31 @@ def draw_ui(frame, ear, mar, ear_counter, mar_counter,
         tw  = cv2.getTextSize(msg, cv2.FONT_HERSHEY_DUPLEX, 0.62, 1)[0][0]
         cv2.putText(frame, msg, ((w-tw)//2, 92),
                     cv2.FONT_HERSHEY_DUPLEX, 0.62, C_WHITE, 1, cv2.LINE_AA)
-    ear_color = C_GREEN if ear >= EAR_THRESHOLD else C_RED
-    mar_color = C_GREEN if mar <= MAR_THRESHOLD else C_ORANGE
-    draw_stat_pill(frame, 10,  h-70, "EYE RATIO (EAR)",   f"{ear:.3f}", ear_color, ear/0.4)
-    draw_stat_pill(frame, 190, h-70, "MOUTH RATIO (MAR)", f"{mar:.3f}", mar_color, mar/1.0)
-    draw_stat_pill(frame, 370, h-70, "TOTAL ALERTS",      str(total_alerts), C_ORANGE)
-    draw_stat_pill(frame, 550, h-70, "EYE FRAMES",
+
+    # ── Bottom stat pills ─────────────────────────────────────────────────
+    ear_color  = C_GREEN if ear >= EAR_THRESHOLD else C_RED
+    mar_color  = C_GREEN if mar <= MAR_THRESHOLD else C_ORANGE
+    ear_bar    = ear / 0.4
+    mar_bar    = mar / 1.0
+
+    draw_stat_pill(frame, 10,   h-70, "EYE RATIO (EAR)",
+                   f"{ear:.3f}", ear_color, ear_bar)
+    draw_stat_pill(frame, 190,  h-70, "MOUTH RATIO (MAR)",
+                   f"{mar:.3f}", mar_color, mar_bar)
+    draw_stat_pill(frame, 370,  h-70, "TOTAL ALERTS",
+                   str(total_alerts), C_ORANGE)
+    draw_stat_pill(frame, 550,  h-70, "EYE FRAMES",
                    f"{ear_counter}/{EAR_CONSEC_FRAMES}", C_GRAY,
-                   ear_counter / EAR_CONSEC_FRAMES)
+                   ear_counter/EAR_CONSEC_FRAMES)
+
+    # ── No face message ───────────────────────────────────────────────────
     return frame
 
 # ── Load Models ──────────────────────────────────────────────────────────
 print("Loading models...")
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-predictor    = dlib.shape_predictor(PREDICTOR_PATH)
+predictor = dlib.shape_predictor(PREDICTOR_PATH)
 print("Models loaded!")
 
 (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
@@ -221,7 +236,8 @@ mar_counter      = 0
 ear_alert_logged = False
 mar_alert_logged = False
 status           = "OK"
-prev_time        = time.perf_counter()
+ear_samples      = []   # live EAR readings for accurate avg_ear at session end
+prev_time        = time.perf_counter() 
 
 print(f"{greeting}! Session {session_id} started.")
 print("Starting webcam... Press Q or ESC to quit.")
@@ -235,29 +251,17 @@ while True:
     if not ret or frame is None:
         break
 
+    # FPS
     now       = time.perf_counter()
     fps       = int(1 / max(now - prev_time, 1e-6))
     prev_time = now
 
     frame = cv2.resize(frame, (900, 660))
+    gray  = np.ascontiguousarray(
+        cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), dtype=np.uint8)
 
-    # Plain grayscale — no equalizeHist, no RGB conversion, no dlib detector
-    # This is the ONLY format that works reliably with dlib predictor on Windows
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # Haar cascade for face detection (dlib HOG detector removed — caused image type crash)
-    haar_faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.05,
-        minNeighbors=3,
-        minSize=(50, 50),
-        flags=cv2.CASCADE_SCALE_IMAGE
-    )
-
-    faces = []
-    if len(haar_faces) > 0:
-        for (x, y, fw, fh) in haar_faces:
-            faces.append(dlib.rectangle(int(x), int(y), int(x+fw), int(y+fh)))
+    faces = face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
 
     ear    = 0.0
     mar    = 0.0
@@ -270,12 +274,12 @@ while True:
                     ((900-tw)//2, 350),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, C_ORANGE, 1, cv2.LINE_AA)
 
-    for dlib_rect in faces:
+    for (x, y, w, h) in faces:
+        dlib_rect = dlib.rectangle(int(x), int(y), int(x+w), int(y+h))
         try:
             shape = predictor(gray, dlib_rect)
             shape = face_utils.shape_to_np(shape)
-        except Exception as e:
-            print(f"[Landmark error] {e}")
+        except Exception:
             continue
 
         leftEye  = shape[lStart:lEnd]
@@ -284,22 +288,23 @@ while True:
 
         ear = (eye_aspect_ratio(leftEye) + eye_aspect_ratio(rightEye)) / 2.0
         mar = mouth_aspect_ratio(mouth)
+        ear_samples.append(round(float(ear), 4))   # record for avg_ear
 
+        # Draw clean contours
         cv2.drawContours(frame, [cv2.convexHull(leftEye)],  -1, C_GREEN, 1)
         cv2.drawContours(frame, [cv2.convexHull(rightEye)], -1, C_GREEN, 1)
         cv2.drawContours(frame, [cv2.convexHull(mouth)],    -1, C_CYAN,  1)
 
-        bx = dlib_rect.left()
-        by = dlib_rect.top()
-        bw = dlib_rect.width()
-        bh = dlib_rect.height()
-        ln  = 18
+        # Clean face box — just corners not full rectangle
+        bx, by, bw, bh = x, y, w, h
+        ln = 18
         clr = C_RED if status != "OK" else (0, 180, 255)
         for px, py, dx, dy in [(bx,by,1,1),(bx+bw,by,-1,1),
                                 (bx,by+bh,1,-1),(bx+bw,by+bh,-1,-1)]:
             cv2.line(frame, (px, py), (px+dx*ln, py), clr, 2)
             cv2.line(frame, (px, py), (px, py+dy*ln), clr, 2)
 
+        # EAR check
         if ear < EAR_THRESHOLD:
             ear_counter += 1
             if ear_counter >= EAR_CONSEC_FRAMES:
@@ -313,6 +318,7 @@ while True:
             ear_counter      = 0
             ear_alert_logged = False
 
+        # MAR check
         if mar > MAR_THRESHOLD:
             mar_counter += 1
             if mar_counter >= MAR_CONSEC_FRAMES:
@@ -338,5 +344,5 @@ while True:
 
 cap.release()
 cv2.destroyAllWindows()
-end_session(session_id)
+end_session(session_id, ear_samples)
 print(f"Session {session_id} ended. Total alerts: {total_alerts}")
