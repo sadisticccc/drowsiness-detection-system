@@ -27,19 +27,21 @@ def index():
     mar_alerts = c.fetchone()["total"]
 
     c.execute("""
-        SELECT id, session_start, session_end, total_alerts,
-        ROUND((JULIANDAY(session_end) - JULIANDAY(session_start)) * 86400) as duration
+        SELECT id, session_start, session_end, total_alerts, avg_ear,
+        ROUND(
+            (JULIANDAY(COALESCE(session_end, datetime('now'))) - JULIANDAY(session_start)) * 86400
+        ) as duration
         FROM sessions ORDER BY id DESC
     """)
     sessions = c.fetchall()
 
     c.execute("""
-        SELECT id, session_start, session_end, total_alerts, avg_ear,
-    ROUND(
-        (JULIANDAY(COALESCE(session_end, datetime('now'))) - JULIANDAY(session_start)) * 86400
-    ) as duration
-    FROM sessions ORDER BY id DESC
-""")
+        SELECT a.id, a.session_id, a.alert_time, a.alert_type,
+               a.ear_value, a.mar_value, a.duration_frames
+        FROM alerts a
+        ORDER BY a.id DESC
+        LIMIT 50
+    """)
     alerts = c.fetchall()
 
     # Alert trend — alerts per session for chart
