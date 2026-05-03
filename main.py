@@ -3,7 +3,7 @@ import dlib
 import numpy as np
 import sqlite3
 import threading
-#import pyttsx3
+import pyttsx3
 import time  
 from datetime import datetime
 from scipy.spatial import distance as dist
@@ -41,12 +41,14 @@ def play_alert_sound(alert_type="EAR"):
     def speak():
         try:
             _engine = pyttsx3.init()
-            _engine.setProperty('rate', 150)
-            _engine.setProperty('volume', 1.0)
+            voices = _engine.getProperty('voices')
+            _engine.setProperty('voice', voices[1].id)  # Zira — female voice
+            _engine.setProperty('rate', 130)             # slower = softer, classier
+            _engine.setProperty('volume', 0.9)
             if alert_type == "EAR":
-                _engine.say("Drowsiness detected! Please take a break.")
+                _engine.say("Please stay alert. Drowsiness has been detected.")
             else:
-                _engine.say("Yawning detected. You seem tired. Please rest.")
+                _engine.say("You appear to be fatigued. Please consider taking a rest.")
             _engine.runAndWait()
             _engine.stop()
         except Exception as e:
