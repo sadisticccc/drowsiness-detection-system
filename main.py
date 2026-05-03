@@ -21,6 +21,15 @@ PREDICTOR_PATH    = "shape_predictor_68_face_landmarks.dat"
 WINDOW_NAME       = "DrowsGuard"
 DB_PATH           = "drowsiness.db"
 
+# ── Weighted Drowsiness Score ────────────────────────────────────────────
+# Instead of counting plain frames, we accumulate a score based on HOW
+# closed the eyes are. Deep closure = score rises fast = faster alert.
+# A normal blink barely moves the score; real drowsiness triggers quickly.
+DROWSY_SCORE_THRESHOLD = 3.0   # total score needed to fire EAR alert
+DROWSY_SCORE_DECAY     = 0.3   # score drops this much every frame eyes are open
+MAR_SCORE_THRESHOLD    = 2.0   # same idea for yawning
+MAR_SCORE_DECAY        = 0.2
+
 # ── Luxury Dark Palette (BGR) ────────────────────────────────────────────
 C_BG          = (8, 10, 14)          # near-black base
 C_PANEL       = (18, 22, 30)         # card background
@@ -258,7 +267,8 @@ def draw_top_bar(img, w, session_id, fps, greeting, frame_count):
 # ── Bottom HUD ─────────────────────────────────────────────────────────────
 def draw_bottom_hud(img, h, w, ear, mar, ear_counter, mar_counter,
                     total_alerts, status, frame_count,
-                    ear_history, mar_history):
+                    ear_history, mar_history,
+                    drowsy_score=0.0, mar_score=0.0):
     bh  = 130    # bottom panel height
     by  = h - bh
     filled_rect(img, (0, by), (w, h), C_BG, 0.96)
@@ -315,10 +325,14 @@ def draw_bottom_hud(img, h, w, ear, mar, ear_counter, mar_counter,
     alert_color = C_GREEN if total_alerts == 0 else (C_AMBER if total_alerts < 5 else C_RED)
     draw_stat_card(img, 520, by + 8, 115, 55, "TOTAL ALERTS",
                    str(total_alerts), accent=alert_color, alert=(total_alerts > 0))
-    draw_stat_card(img, 520, by + 68, 115, 55, "EYE FRAMES",
-                   f"{ear_counter:02d} / {EAR_CONSEC_FRAMES}",
-                   bar_pct=ear_counter / EAR_CONSEC_FRAMES,
-                   accent=C_RED if ear_counter > EAR_CONSEC_FRAMES * 0.7 else C_MUTED)
+
+    # Show drowsy score as a 0-100% bar so it's human readable
+    score_pct = min(drowsy_score / DROWSY_SCORE_THRESHOLD, 1.0)
+    score_col = C_RED if score_pct > 0.7 else (C_AMBER if score_pct > 0.3 else C_MUTED)
+    draw_stat_card(img, 520, by + 68, 115, 55, "DROWSY SCORE",
+                   f"{min(int(score_pct * 100), 100)}%",
+                   bar_pct=score_pct,
+                   accent=score_col)
 
     # ── Driver status ────────────────────────────────────────────────────
     cv2.line(img, (648, by + 15), (648, h - 15), C_BORDER, 1, cv2.LINE_AA)
@@ -538,6 +552,10 @@ status           = "OK"
 prev_time        = time.perf_counter()
 frame_count      = 0
 
+# Weighted drowsiness scores
+drowsy_score     = 0.0   # accumulates based on how far EAR drops below threshold
+mar_score        = 0.0   # accumulates based on how far MAR rises above threshold
+
 # Signal histories for waveform
 ear_history = []
 mar_history = []
@@ -604,33 +622,44 @@ while True:
         face_col = C_RED if status != "OK" else C_ACCENT
         draw_face_bracket(frame, bx, by_, bw, bh_, face_col, pulse=(status != "OK"))
 
-        # EAR check
+        # ── EAR check (weighted score) ──────────────────────────────────
+        # Score rises faster the more closed the eyes are.
+        # Normal blink (EAR ~0.22, 3-4 frames): score barely reaches ~0.4 — no alert
+        # Tired eyes (EAR ~0.18, 8 frames):     score reaches ~2.8   — alert in ~0.5s
+        # Fully closed (EAR ~0.05, 4 frames):   score reaches ~3.2   — alert in ~0.3s
         if ear < EAR_THRESHOLD:
-            ear_counter += 1
-            if ear_counter >= EAR_CONSEC_FRAMES:
+            ear_counter  += 1
+            deficit       = EAR_THRESHOLD - ear          # how far below threshold
+            drowsy_score += deficit * 10                 # weight by severity
+            if drowsy_score >= DROWSY_SCORE_THRESHOLD:
                 status = "EAR"
                 if not ear_alert_logged:
                     log_alert(session_id, "EAR", ear, mar, ear_counter)
-                    total_alerts += 1
-                    ear_alert_logged = True
+                    total_alerts     += 1
+                    ear_alert_logged  = True
                     play_alert_sound("EAR")
         else:
-            ear_counter      = 0
+            ear_counter   = 0
             ear_alert_logged = False
+            # Decay score gradually — eyes briefly open shouldn't reset everything
+            drowsy_score  = max(0.0, drowsy_score - DROWSY_SCORE_DECAY)
 
-        # MAR check
+        # ── MAR check (weighted score) ──────────────────────────────────
         if mar > MAR_THRESHOLD:
             mar_counter += 1
-            if mar_counter >= MAR_CONSEC_FRAMES:
+            surplus      = mar - MAR_THRESHOLD           # how far above threshold
+            mar_score   += surplus * 8
+            if mar_score >= MAR_SCORE_THRESHOLD:
                 if status == "OK": status = "MAR"
                 if not mar_alert_logged:
                     log_alert(session_id, "MAR", ear, mar, mar_counter)
-                    total_alerts += 1
+                    total_alerts    += 1
                     mar_alert_logged = True
                     play_alert_sound("MAR")
         else:
             mar_counter      = 0
             mar_alert_logged = False
+            mar_score        = max(0.0, mar_score - MAR_SCORE_DECAY)
 
     # ── Draw all HUD layers ─────────────────────────────────────────────
     draw_top_bar(frame, 900, session_id, fps, greeting, frame_count)
@@ -638,7 +667,8 @@ while True:
     draw_bottom_hud(frame, 660, 900, ear, mar,
                     ear_counter, mar_counter,
                     total_alerts, status, frame_count,
-                    ear_history, mar_history)
+                    ear_history, mar_history,
+                    drowsy_score, mar_score)
     draw_corner_reticles(frame, 900, 660)
     draw_scanlines(frame, 660, 900)
 
