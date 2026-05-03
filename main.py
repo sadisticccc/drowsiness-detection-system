@@ -32,7 +32,7 @@ C_PANEL   = (30, 35, 45)
 
 def get_greeting():
     hour = datetime.now().hour
-    if 5 <= hour < 12:   return "Good Morning"
+    if 5 <= hour < 12:    return "Good Morning"
     elif 12 <= hour < 17: return "Good Afternoon"
     elif 17 <= hour < 21: return "Good Evening"
     else:                 return "Good Night"
@@ -67,6 +67,7 @@ def init_db():
             session_id INTEGER, alert_time TEXT,
             alert_type TEXT, ear_value REAL,
             mar_value REAL, duration_frames INTEGER,
+            latency_ms REAL,
             synced INTEGER DEFAULT 0)''')
         conn.commit()
         conn.close()
@@ -82,15 +83,16 @@ def start_session():
         conn.close()
     return sid
 
-def log_alert(session_id, alert_type, ear, mar, frames):
+def log_alert(session_id, alert_type, ear, mar, frames, latency_ms=0.0):
     with db_lock:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         c = conn.cursor()
         c.execute('''INSERT INTO alerts
-            (session_id, alert_time, alert_type, ear_value, mar_value, duration_frames)
-            VALUES (?,?,?,?,?,?)''',
+            (session_id, alert_time, alert_type, ear_value, mar_value, duration_frames, latency_ms)
+            VALUES (?,?,?,?,?,?,?)''',
             (session_id, datetime.now().isoformat(), alert_type,
-             round(float(ear), 4), round(float(mar), 4), int(frames)))
+             round(float(ear), 4), round(float(mar), 4), int(frames),
+             round(float(latency_ms), 2)))
         c.execute("UPDATE sessions SET total_alerts = total_alerts + 1 WHERE id=?",
                   (session_id,))
         conn.commit()
@@ -106,9 +108,7 @@ def end_session(session_id):
         """, (session_id,))
         avg_ear = round(c.fetchone()[0], 4)
         c.execute("""
-            UPDATE sessions
-            SET session_end=?, avg_ear=?
-            WHERE id=?
+            UPDATE sessions SET session_end=?, avg_ear=? WHERE id=?
         """, (datetime.now().isoformat(), avg_ear, session_id))
         conn.commit()
         conn.close()
@@ -149,26 +149,23 @@ def draw_stat_pill(frame, x, y, label, value, val_color, bar_val=None):
         cv2.rectangle(frame, (x+10, y+48), (x+10+bar_w, y+51), val_color, -1)
 
 def draw_ui(frame, ear, mar, ear_counter, mar_counter,
-            session_id, total_alerts, greeting, status, fps):
+            session_id, total_alerts, greeting, status, fps, last_latency_ms):
     h, w = frame.shape[:2]
 
     # ── Top navbar ────────────────────────────────────────────────────────
     draw_rounded_rect(frame, (0, 0), (w, 58), C_DARK, 0.92, radius=0)
     cv2.line(frame, (0, 58), (w, 58), (50, 55, 65), 1)
 
-    # Logo dot
     cv2.circle(frame, (22, 29), 7, C_CYAN, -1)
     cv2.putText(frame, "DrowsGuard", (38, 37),
                 cv2.FONT_HERSHEY_DUPLEX, 0.75, C_CYAN, 1, cv2.LINE_AA)
 
-    # Center greeting + time
     now_str = datetime.now().strftime("%H:%M:%S")
     greet_text = f"{greeting}  |  {now_str}"
     tw = cv2.getTextSize(greet_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0][0]
     cv2.putText(frame, greet_text, ((w - tw)//2, 36),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.48, C_WHITE, 1, cv2.LINE_AA)
 
-    # Right — session + FPS
     cv2.putText(frame, f"Session #{session_id}   {fps} FPS", (w-200, 36),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.42, C_GRAY, 1, cv2.LINE_AA)
 
@@ -189,29 +186,32 @@ def draw_ui(frame, ear, mar, ear_counter, mar_counter,
                     cv2.FONT_HERSHEY_DUPLEX, 0.62, C_WHITE, 1, cv2.LINE_AA)
 
     # ── Bottom stat pills ─────────────────────────────────────────────────
-    ear_color  = C_GREEN if ear >= EAR_THRESHOLD else C_RED
-    mar_color  = C_GREEN if mar <= MAR_THRESHOLD else C_ORANGE
-    ear_bar    = ear / 0.4
-    mar_bar    = mar / 1.0
+    ear_color = C_GREEN if ear >= EAR_THRESHOLD else C_RED
+    mar_color = C_GREEN if mar <= MAR_THRESHOLD else C_ORANGE
 
-    draw_stat_pill(frame, 10,   h-70, "EYE RATIO (EAR)",
-                   f"{ear:.3f}", ear_color, ear_bar)
-    draw_stat_pill(frame, 190,  h-70, "MOUTH RATIO (MAR)",
-                   f"{mar:.3f}", mar_color, mar_bar)
-    draw_stat_pill(frame, 370,  h-70, "TOTAL ALERTS",
+    draw_stat_pill(frame, 10,  h-70, "EYE RATIO (EAR)",
+                   f"{ear:.3f}", ear_color, ear/0.4)
+    draw_stat_pill(frame, 190, h-70, "MOUTH RATIO (MAR)",
+                   f"{mar:.3f}", mar_color, mar/1.0)
+    draw_stat_pill(frame, 370, h-70, "TOTAL ALERTS",
                    str(total_alerts), C_ORANGE)
-    draw_stat_pill(frame, 550,  h-70, "EYE FRAMES",
+    draw_stat_pill(frame, 550, h-70, "EYE FRAMES",
                    f"{ear_counter}/{EAR_CONSEC_FRAMES}", C_GRAY,
                    ear_counter/EAR_CONSEC_FRAMES)
 
-    # ── No face message ───────────────────────────────────────────────────
+    # ── Latency pill (bottom right) ───────────────────────────────────────
+    if last_latency_ms > 0:
+        lat_color = C_GREEN if last_latency_ms < 1000 else C_RED
+        draw_stat_pill(frame, w-180, h-70, "ALERT LATENCY",
+                       f"{last_latency_ms:.0f}ms", lat_color)
+
     return frame
 
 # ── Load Models ──────────────────────────────────────────────────────────
 print("Loading models...")
 face_cascade = cv2.CascadeClassifier(
     cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
-predictor = dlib.shape_predictor(PREDICTOR_PATH)
+predictor    = dlib.shape_predictor(PREDICTOR_PATH)
 print("Models loaded!")
 
 (lStart, lEnd) = face_utils.FACIAL_LANDMARKS_IDXS["left_eye"]
@@ -227,8 +227,15 @@ mar_counter      = 0
 ear_alert_logged = False
 mar_alert_logged = False
 status           = "OK"
-fps_samples      = []   # collects FPS every frame to prove >=15 FPS requirement
-prev_time        = time.perf_counter() 
+fps_samples      = []
+last_latency_ms  = 0.0
+
+# ── Latency tracking ─────────────────────────────────────────────────────
+ear_trigger_time = 0.0
+mar_trigger_time = 0.0
+latency_log      = []   # stores all measured latencies for end-of-session report
+
+prev_time = time.perf_counter()
 
 print(f"{greeting}! Session {session_id} started.")
 print("Starting webcam... Press Q or ESC to quit.")
@@ -246,7 +253,7 @@ while True:
     now       = time.perf_counter()
     fps       = int(1 / max(now - prev_time, 1e-6))
     prev_time = now
-    if fps < 500:                  # ignore the first-frame spike
+    if fps < 500:
         fps_samples.append(fps)
 
     frame = cv2.resize(frame, (900, 660))
@@ -254,7 +261,8 @@ while True:
         cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), dtype=np.uint8)
 
     faces = face_cascade.detectMultiScale(
-        gray, scaleFactor=1.1, minNeighbors=5, minSize=(30, 30))
+        gray, scaleFactor=1.05, minNeighbors=3, minSize=(50, 50),
+        flags=cv2.CASCADE_SCALE_IMAGE)
 
     ear    = 0.0
     mar    = 0.0
@@ -272,7 +280,8 @@ while True:
         try:
             shape = predictor(gray, dlib_rect)
             shape = face_utils.shape_to_np(shape)
-        except Exception:
+        except Exception as e:
+            print(f"[Landmark error] {e}")
             continue
 
         leftEye  = shape[lStart:lEnd]
@@ -282,50 +291,62 @@ while True:
         ear = (eye_aspect_ratio(leftEye) + eye_aspect_ratio(rightEye)) / 2.0
         mar = mouth_aspect_ratio(mouth)
 
-        # Draw clean contours
         cv2.drawContours(frame, [cv2.convexHull(leftEye)],  -1, C_GREEN, 1)
         cv2.drawContours(frame, [cv2.convexHull(rightEye)], -1, C_GREEN, 1)
         cv2.drawContours(frame, [cv2.convexHull(mouth)],    -1, C_CYAN,  1)
 
-        # Clean face box — just corners not full rectangle
         bx, by, bw, bh = x, y, w, h
-        ln = 18
+        ln  = 18
         clr = C_RED if status != "OK" else (0, 180, 255)
         for px, py, dx, dy in [(bx,by,1,1),(bx+bw,by,-1,1),
                                 (bx,by+bh,1,-1),(bx+bw,by+bh,-1,-1)]:
             cv2.line(frame, (px, py), (px+dx*ln, py), clr, 2)
             cv2.line(frame, (px, py), (px, py+dy*ln), clr, 2)
 
-        # EAR check
+        # ── EAR check with latency measurement ───────────────────────────
         if ear < EAR_THRESHOLD:
+            if ear_counter == 0:
+                ear_trigger_time = time.perf_counter()  # start timer on first bad frame
             ear_counter += 1
             if ear_counter >= EAR_CONSEC_FRAMES:
                 status = "EAR"
                 if not ear_alert_logged:
-                    log_alert(session_id, "EAR", ear, mar, ear_counter)
+                    latency_ms = (time.perf_counter() - ear_trigger_time) * 1000
+                    last_latency_ms = latency_ms
+                    latency_log.append(("EAR", latency_ms))
+                    print(f"[Latency] EAR alert triggered in {latency_ms:.1f}ms")
+                    log_alert(session_id, "EAR", ear, mar, ear_counter, latency_ms)
                     total_alerts += 1
                     ear_alert_logged = True
                     play_alert_sound("EAR")
         else:
             ear_counter      = 0
             ear_alert_logged = False
+            ear_trigger_time = 0.0
 
-        # MAR check
+        # ── MAR check with latency measurement ───────────────────────────
         if mar > MAR_THRESHOLD:
+            if mar_counter == 0:
+                mar_trigger_time = time.perf_counter()  # start timer on first yawn frame
             mar_counter += 1
             if mar_counter >= MAR_CONSEC_FRAMES:
                 if status == "OK": status = "MAR"
                 if not mar_alert_logged:
-                    log_alert(session_id, "MAR", ear, mar, mar_counter)
+                    latency_ms = (time.perf_counter() - mar_trigger_time) * 1000
+                    last_latency_ms = latency_ms
+                    latency_log.append(("MAR", latency_ms))
+                    print(f"[Latency] MAR alert triggered in {latency_ms:.1f}ms")
+                    log_alert(session_id, "MAR", ear, mar, mar_counter, latency_ms)
                     total_alerts += 1
                     mar_alert_logged = True
                     play_alert_sound("MAR")
         else:
             mar_counter      = 0
             mar_alert_logged = False
+            mar_trigger_time = 0.0
 
     frame = draw_ui(frame, ear, mar, ear_counter, mar_counter,
-                    session_id, total_alerts, greeting, status, fps)
+                    session_id, total_alerts, greeting, status, fps, last_latency_ms)
 
     cv2.imshow(WINDOW_NAME, frame)
 
@@ -338,18 +359,18 @@ cap.release()
 cv2.destroyAllWindows()
 end_session(session_id)
 print(f"Session {session_id} ended. Total alerts: {total_alerts}")
+
 # ── FPS Performance Report ────────────────────────────────────────────────
 if fps_samples:
     avg_fps = round(sum(fps_samples) / len(fps_samples), 2)
     min_fps = min(fps_samples)
     max_fps = max(fps_samples)
-    frames  = len(fps_samples)
     passed  = "PASS" if avg_fps >= 15 else "FAIL"
 
     report = (
-        f"=== FPS Performance Report - Session {session_id} ===\n"
+        f"\n=== FPS Performance Report - Session {session_id} ===\n"
         f"Date       : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"Frames     : {frames}\n"
+        f"Frames     : {len(fps_samples)}\n"
         f"Average FPS: {avg_fps}\n"
         f"Min FPS    : {min_fps}\n"
         f"Max FPS    : {max_fps}\n"
@@ -358,7 +379,43 @@ if fps_samples:
         f"{'='*48}\n"
     )
     print(report)
-
-    # Append to fps_log.txt so every session is recorded
     with open("fps_log.txt", "a") as f:
         f.write(report)
+
+# ── Latency Report ────────────────────────────────────────────────────────
+if latency_log:
+    ear_lats = [ms for t, ms in latency_log if t == "EAR"]
+    mar_lats = [ms for t, ms in latency_log if t == "MAR"]
+    all_lats = [ms for _, ms in latency_log]
+
+    lat_report = (
+        f"\n=== Alert Latency Report - Session {session_id} ===\n"
+        f"Date            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Total alerts    : {len(latency_log)}\n"
+    )
+    if ear_lats:
+        lat_report += (
+            f"EAR alerts      : {len(ear_lats)}\n"
+            f"EAR avg latency : {round(sum(ear_lats)/len(ear_lats), 1)}ms\n"
+            f"EAR min latency : {round(min(ear_lats), 1)}ms\n"
+            f"EAR max latency : {round(max(ear_lats), 1)}ms\n"
+        )
+    if mar_lats:
+        lat_report += (
+            f"MAR alerts      : {len(mar_lats)}\n"
+            f"MAR avg latency : {round(sum(mar_lats)/len(mar_lats), 1)}ms\n"
+            f"MAR min latency : {round(min(mar_lats), 1)}ms\n"
+            f"MAR max latency : {round(max(mar_lats), 1)}ms\n"
+        )
+    lat_report += (
+        f"Overall avg     : {round(sum(all_lats)/len(all_lats), 1)}ms\n"
+        f"Requirement     : <100ms (Could)\n"
+        f"Note            : Latency = frames_required x frame_duration.\n"
+        f"                  At 15fps, 20 EAR frames = ~1333ms by design.\n"
+        f"                  Reduce EAR_CONSEC_FRAMES for faster alerts\n"
+        f"                  (tradeoff: more false positives).\n"
+        f"{'='*48}\n"
+    )
+    print(lat_report)
+    with open("latency_log.txt", "a") as f:
+        f.write(lat_report)

@@ -1,0 +1,19 @@
+=== FPS Performance Report - Session 2 ===
+Date       : 2026-05-03 19:14:50
+Frames     : 289
+Average FPS: 28.18
+Min FPS    : 0
+Max FPS    : 38
+Requirement: >=15 FPS
+Result     : PASS
+================================================
+
+=== FPS Performance Report - Session 4 ===
+Date       : 2026-05-03 19:24:38
+Frames     : 259
+Average FPS: 18.31
+Min FPS    : 0
+Max FPS    : 25
+Requirement: >=15 FPS
+Result     : PASS
+================================================

@@ -1,0 +1,15 @@
+
+=== Alert Latency Report - Session 4 ===
+Date            : 2026-05-03 19:24:38
+Total alerts    : 1
+EAR alerts      : 1
+EAR avg latency : 685.1ms
+EAR min latency : 685.1ms
+EAR max latency : 685.1ms
+Overall avg     : 685.1ms
+Requirement     : <100ms (Could)
+Note            : Latency = frames_required x frame_duration.
+                  At 15fps, 20 EAR frames = ~1333ms by design.
+                  Reduce EAR_CONSEC_FRAMES for faster alerts
+                  (tradeoff: more false positives).
+================================================
