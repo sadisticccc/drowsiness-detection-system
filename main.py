@@ -67,8 +67,14 @@ def init_db():
             session_id INTEGER, alert_time TEXT,
             alert_type TEXT, ear_value REAL,
             mar_value REAL, duration_frames INTEGER,
-            latency_ms REAL,
+            latency_ms REAL DEFAULT 0.0,
             synced INTEGER DEFAULT 0)''')
+        # Add latency_ms column if upgrading from old DB
+        try:
+            conn.execute("ALTER TABLE alerts ADD COLUMN latency_ms REAL DEFAULT 0.0")
+            conn.commit()
+        except Exception:
+            pass
         conn.commit()
         conn.close()
 
@@ -102,14 +108,11 @@ def end_session(session_id):
     with db_lock:
         conn = sqlite3.connect(DB_PATH, check_same_thread=False)
         c = conn.cursor()
-        c.execute("""
-            SELECT COALESCE(AVG(ear_value), 0.0)
-            FROM alerts WHERE session_id=?
-        """, (session_id,))
+        c.execute("SELECT COALESCE(AVG(ear_value), 0.0) FROM alerts WHERE session_id=?",
+                  (session_id,))
         avg_ear = round(c.fetchone()[0], 4)
-        c.execute("""
-            UPDATE sessions SET session_end=?, avg_ear=? WHERE id=?
-        """, (datetime.now().isoformat(), avg_ear, session_id))
+        c.execute("UPDATE sessions SET session_end=?, avg_ear=? WHERE id=?",
+                  (datetime.now().isoformat(), avg_ear, session_id))
         conn.commit()
         conn.close()
 
@@ -149,27 +152,27 @@ def draw_stat_pill(frame, x, y, label, value, val_color, bar_val=None):
         cv2.rectangle(frame, (x+10, y+48), (x+10+bar_w, y+51), val_color, -1)
 
 def draw_ui(frame, ear, mar, ear_counter, mar_counter,
-            session_id, total_alerts, greeting, status, fps, last_latency_ms):
+            session_id, total_alerts, greeting, status, fps,
+            last_latency_ms, cam_name):
     h, w = frame.shape[:2]
 
-    # ── Top navbar ────────────────────────────────────────────────────────
     draw_rounded_rect(frame, (0, 0), (w, 58), C_DARK, 0.92, radius=0)
     cv2.line(frame, (0, 58), (w, 58), (50, 55, 65), 1)
-
     cv2.circle(frame, (22, 29), 7, C_CYAN, -1)
     cv2.putText(frame, "DrowsGuard", (38, 37),
                 cv2.FONT_HERSHEY_DUPLEX, 0.75, C_CYAN, 1, cv2.LINE_AA)
 
-    now_str = datetime.now().strftime("%H:%M:%S")
+    now_str    = datetime.now().strftime("%H:%M:%S")
     greet_text = f"{greeting}  |  {now_str}"
     tw = cv2.getTextSize(greet_text, cv2.FONT_HERSHEY_SIMPLEX, 0.48, 1)[0][0]
     cv2.putText(frame, greet_text, ((w - tw)//2, 36),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.48, C_WHITE, 1, cv2.LINE_AA)
 
-    cv2.putText(frame, f"Session #{session_id}   {fps} FPS", (w-200, 36),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.42, C_GRAY, 1, cv2.LINE_AA)
+    # Show camera name + session + FPS on the right
+    right_text = f"{cam_name}  |  Session #{session_id}  {fps} FPS"
+    cv2.putText(frame, right_text, (w-320, 36),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.38, C_GRAY, 1, cv2.LINE_AA)
 
-    # ── Alert banner ──────────────────────────────────────────────────────
     if status == "EAR":
         draw_rounded_rect(frame, (0, 62), (w, 108), (0, 0, 180), 0.92, radius=0)
         cv2.line(frame, (0, 108), (w, 108), (0, 0, 220), 1)
@@ -185,27 +188,82 @@ def draw_ui(frame, ear, mar, ear_counter, mar_counter,
         cv2.putText(frame, msg, ((w-tw)//2, 92),
                     cv2.FONT_HERSHEY_DUPLEX, 0.62, C_WHITE, 1, cv2.LINE_AA)
 
-    # ── Bottom stat pills ─────────────────────────────────────────────────
     ear_color = C_GREEN if ear >= EAR_THRESHOLD else C_RED
     mar_color = C_GREEN if mar <= MAR_THRESHOLD else C_ORANGE
 
-    draw_stat_pill(frame, 10,  h-70, "EYE RATIO (EAR)",
-                   f"{ear:.3f}", ear_color, ear/0.4)
-    draw_stat_pill(frame, 190, h-70, "MOUTH RATIO (MAR)",
-                   f"{mar:.3f}", mar_color, mar/1.0)
-    draw_stat_pill(frame, 370, h-70, "TOTAL ALERTS",
-                   str(total_alerts), C_ORANGE)
+    draw_stat_pill(frame, 10,  h-70, "EYE RATIO (EAR)",   f"{ear:.3f}", ear_color, ear/0.4)
+    draw_stat_pill(frame, 190, h-70, "MOUTH RATIO (MAR)", f"{mar:.3f}", mar_color, mar/1.0)
+    draw_stat_pill(frame, 370, h-70, "TOTAL ALERTS",      str(total_alerts), C_ORANGE)
     draw_stat_pill(frame, 550, h-70, "EYE FRAMES",
                    f"{ear_counter}/{EAR_CONSEC_FRAMES}", C_GRAY,
                    ear_counter/EAR_CONSEC_FRAMES)
 
-    # ── Latency pill (bottom right) ───────────────────────────────────────
     if last_latency_ms > 0:
         lat_color = C_GREEN if last_latency_ms < 1000 else C_RED
         draw_stat_pill(frame, w-180, h-70, "ALERT LATENCY",
                        f"{last_latency_ms:.0f}ms", lat_color)
 
+    # ── Camera switch hint ────────────────────────────────────────────────
+    cv2.putText(frame, "Press C to switch camera", (10, h-80),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.35, C_GRAY, 1, cv2.LINE_AA)
+
     return frame
+
+# ── Camera detection ──────────────────────────────────────────────────────
+def detect_cameras():
+    """Scan camera indices 0-9 and return list of (index, label) for working ones."""
+    print("Scanning for cameras...")
+    available = []
+    for i in range(10):
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)  # CAP_DSHOW = Windows DirectShow, finds virtual cams
+        if cap.isOpened():
+            ret, _ = cap.read()
+            if ret:
+                # Try to get a name — DirectShow backend supports this
+                name = f"Camera {i}"
+                if i == 0:
+                    name = f"Camera {i} (Built-in)"
+                available.append((i, name))
+                print(f"  [{i}] {name}")
+            cap.release()
+    return available
+
+def select_camera(available):
+    """Let user pick a camera from the list."""
+    if not available:
+        print("No cameras found!")
+        return 0
+    if len(available) == 1:
+        print(f"Only one camera found: {available[0][1]}")
+        return available[0][0]
+
+    print("\nAvailable cameras:")
+    for idx, (cam_idx, name) in enumerate(available):
+        print(f"  {idx + 1}. {name}")
+    print(f"  (default = 1 in 5 seconds)")
+
+    # Auto-select after 5 seconds if no input
+    import msvcrt, time as _time
+    deadline = _time.time() + 5
+    choice_str = ""
+    while _time.time() < deadline:
+        if msvcrt.kbhit():
+            ch = msvcrt.getwche()
+            if ch == '\r':
+                break
+            choice_str += ch
+
+    try:
+        choice = int(choice_str.strip()) - 1
+        if 0 <= choice < len(available):
+            selected = available[choice]
+            print(f"\nSelected: {selected[1]}")
+            return selected[0]
+    except Exception:
+        pass
+
+    print(f"\nDefaulting to: {available[0][1]}")
+    return available[0][0]
 
 # ── Load Models ──────────────────────────────────────────────────────────
 print("Loading models...")
@@ -218,6 +276,11 @@ print("Models loaded!")
 (rStart, rEnd) = face_utils.FACIAL_LANDMARKS_IDXS["right_eye"]
 (mStart, mEnd) = face_utils.FACIAL_LANDMARKS_IDXS["inner_mouth"]
 
+# ── Detect & select camera ────────────────────────────────────────────────
+available_cameras = detect_cameras()
+cam_index         = select_camera(available_cameras)
+cam_name          = next((n for i, n in available_cameras if i == cam_index), f"Camera {cam_index}")
+
 init_db()
 session_id       = start_session()
 greeting         = get_greeting()
@@ -229,27 +292,26 @@ mar_alert_logged = False
 status           = "OK"
 fps_samples      = []
 last_latency_ms  = 0.0
-
-# ── Latency tracking ─────────────────────────────────────────────────────
 ear_trigger_time = 0.0
 mar_trigger_time = 0.0
-latency_log      = []   # stores all measured latencies for end-of-session report
-
-prev_time = time.perf_counter()
+latency_log      = []
+prev_time        = time.perf_counter()
 
 print(f"{greeting}! Session {session_id} started.")
-print("Starting webcam... Press Q or ESC to quit.")
+print(f"Using: {cam_name}")
+print("Starting webcam... Press Q or ESC to quit. Press C to switch camera.")
 
-cap = cv2.VideoCapture(0)
+cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
 cv2.namedWindow(WINDOW_NAME, cv2.WINDOW_NORMAL)
 cv2.resizeWindow(WINDOW_NAME, 900, 660)
 
 while True:
     ret, frame = cap.read()
     if not ret or frame is None:
-        break
+        print("[Warning] Frame not received — retrying...")
+        time.sleep(0.1)
+        continue
 
-    # FPS
     now       = time.perf_counter()
     fps       = int(1 / max(now - prev_time, 1e-6))
     prev_time = now
@@ -303,10 +365,9 @@ while True:
             cv2.line(frame, (px, py), (px+dx*ln, py), clr, 2)
             cv2.line(frame, (px, py), (px, py+dy*ln), clr, 2)
 
-        # ── EAR check with latency measurement ───────────────────────────
         if ear < EAR_THRESHOLD:
             if ear_counter == 0:
-                ear_trigger_time = time.perf_counter()  # start timer on first bad frame
+                ear_trigger_time = time.perf_counter()
             ear_counter += 1
             if ear_counter >= EAR_CONSEC_FRAMES:
                 status = "EAR"
@@ -324,10 +385,9 @@ while True:
             ear_alert_logged = False
             ear_trigger_time = 0.0
 
-        # ── MAR check with latency measurement ───────────────────────────
         if mar > MAR_THRESHOLD:
             if mar_counter == 0:
-                mar_trigger_time = time.perf_counter()  # start timer on first yawn frame
+                mar_trigger_time = time.perf_counter()
             mar_counter += 1
             if mar_counter >= MAR_CONSEC_FRAMES:
                 if status == "OK": status = "MAR"
@@ -346,13 +406,37 @@ while True:
             mar_trigger_time = 0.0
 
     frame = draw_ui(frame, ear, mar, ear_counter, mar_counter,
-                    session_id, total_alerts, greeting, status, fps, last_latency_ms)
+                    session_id, total_alerts, greeting, status, fps,
+                    last_latency_ms, cam_name)
 
     cv2.imshow(WINDOW_NAME, frame)
 
+    key = cv2.waitKey(1) & 0xFF
+
+    # ── C key: switch camera on the fly ──────────────────────────────────
+    if key == ord('c') or key == ord('C'):
+        print("\n[Camera] Switching camera...")
+        cap.release()
+        # Cycle to next available camera
+        current_indices = [i for i, n in available_cameras]
+        if cam_index in current_indices:
+            pos = current_indices.index(cam_index)
+            next_pos  = (pos + 1) % len(current_indices)
+            cam_index = current_indices[next_pos]
+        else:
+            cam_index = current_indices[0]
+        cam_name = next((n for i, n in available_cameras if i == cam_index), f"Camera {cam_index}")
+        cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+        print(f"[Camera] Switched to: {cam_name}")
+        # Reset counters on camera switch
+        ear_counter = 0
+        mar_counter = 0
+        ear_alert_logged = False
+        mar_alert_logged = False
+
     if cv2.getWindowProperty(WINDOW_NAME, cv2.WND_PROP_VISIBLE) < 1:
         break
-    if cv2.waitKey(1) & 0xFF in [ord('q'), 27]:
+    if key in [ord('q'), 27]:
         break
 
 cap.release()
@@ -366,10 +450,10 @@ if fps_samples:
     min_fps = min(fps_samples)
     max_fps = max(fps_samples)
     passed  = "PASS" if avg_fps >= 15 else "FAIL"
-
-    report = (
+    report  = (
         f"\n=== FPS Performance Report - Session {session_id} ===\n"
         f"Date       : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Camera     : {cam_name}\n"
         f"Frames     : {len(fps_samples)}\n"
         f"Average FPS: {avg_fps}\n"
         f"Min FPS    : {min_fps}\n"
@@ -387,10 +471,10 @@ if latency_log:
     ear_lats = [ms for t, ms in latency_log if t == "EAR"]
     mar_lats = [ms for t, ms in latency_log if t == "MAR"]
     all_lats = [ms for _, ms in latency_log]
-
     lat_report = (
         f"\n=== Alert Latency Report - Session {session_id} ===\n"
         f"Date            : {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        f"Camera          : {cam_name}\n"
         f"Total alerts    : {len(latency_log)}\n"
     )
     if ear_lats:
