@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "🎥 DETECTION",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "📊 DASHBOARD",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/dashboard.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "🚗 RIDE SIM",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/ride_simulation.py",
+      "console": "integratedTerminal"
+    },
+    {
+      "name": "🧪 ACCURACY TEST",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/accuracy_test.py",
+      "console": "integratedTerminal"
+    }
+  ]
+}
